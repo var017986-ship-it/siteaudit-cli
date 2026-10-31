@@ -33,7 +33,7 @@ class _PageParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "form" and self._form is not None:
-            if self._form["method"] == "GET" and self._form["inputs"]:
+            if self._form["method"] in {"GET", "POST"} and self._form["inputs"]:
                 self.forms.append(self._form)
             self._form = None
 
@@ -102,8 +102,7 @@ _STATE_CHANGING_WORDS = {"logout", "signout", "delete", "remove", "unsubscribe",
 def _is_stateful_url(url: str) -> bool:
     parsed = urlsplit(url)
     path = parsed.path.lower()
-    blocked_words = ("logout", "signout", "delete", "remove", "unsubscribe", "purchase", "checkout", "payment", "pay/", "cancel", "deactivate")
-    if any(word in path for word in blocked_words):
+    if any(word in path for word in _STATE_CHANGING_WORDS):
         return True
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
         key_words = set(key.lower().replace("-", "_").split("_"))
@@ -129,6 +128,7 @@ def crawl(ctx: ScanContext) -> None:
             continue
         seen.add(current)
         response = ctx.request("GET", current)
+        ctx.record_response(response)
         ctx.discovered_urls.append(response.url)
         if depth == 0:
             _check_headers(ctx, response)

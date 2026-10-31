@@ -148,8 +148,10 @@ def _check_allowed_methods(ctx) -> None:
     )
 
 
-def run(ctx) -> None:
+def run(ctx) -> int:
     """Run bounded metadata-only web-server checks and append findings."""
+    requests_before = ctx.request_count
     origin = _origin(ctx.base_url)
     _check_sensitive_paths(ctx, origin)
     _check_allowed_methods(ctx)
+    return ctx.request_count - requests_before

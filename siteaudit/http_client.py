@@ -6,7 +6,7 @@ import socket
 import ssl
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -106,6 +106,9 @@ class ScanContext:
         self.findings: list[Finding] = []
         self.discovered_urls: list[str] = []
         self.discovered_forms: list[dict[str, Any]] = []
+        self.discovered_responses: list[ScanResponse] = []
+        self._cached_response_bytes = 0
+        self.response_cache_limited = False
         self._request_count = 0
         self._last_request_at = 0.0
         self._lock = threading.Lock()
@@ -208,6 +211,27 @@ class ScanContext:
             self.findings.append(finding)
         return finding
 
+    def record_response(self, response: ScanResponse) -> None:
+        """Keep a small in-memory response sample for passive plugins only."""
+        max_count = int(self.options.get("max_cached_responses", 100))
+        max_bytes = int(self.options.get("max_cached_response_bytes", 2_000_000))
+        if response.error or response.status_code is None:
+            return
+        if len(self.discovered_responses) >= max_count:
+            self.response_cache_limited = True
+            return
+        remaining = max(0, max_bytes - self._cached_response_bytes)
+        cached_body = response.body[:remaining]
+        if len(cached_body) < len(response.body):
+            self.response_cache_limited = True
+        cached = replace(
+            response,
+            body=cached_body,
+            truncated=response.truncated or len(cached_body) < len(response.body),
+        )
+        self.discovered_responses.append(cached)
+        self._cached_response_bytes += len(cached_body)
+
     def request(
         self,
         method: str,
@@ -249,7 +273,7 @@ class ScanContext:
                         time.sleep(wait_for)
                     self._last_request_at = time.monotonic()
 
-                request_headers = {"User-Agent": "SiteAudit/0.2.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
+                request_headers = {"User-Agent": "SiteAudit/0.3.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
                 if headers:
                     request_headers.update(headers)
                 req = Request(target, headers=request_headers, method=verb)

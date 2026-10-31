@@ -218,7 +218,7 @@ def _record(ctx: object, *, finding_id: str, title: str, severity: str, confiden
     )
 
 
-def run(ctx: object) -> None:
+def run(ctx: object) -> int:
     """Run bounded inert GET probes against discovered query parameters.
 
     Reflection is reported as a low-confidence HTML-injection indicator, not a
@@ -226,6 +226,7 @@ def run(ctx: object) -> None:
     a recognizable server error that was absent in the baseline response.
     """
     requests_used = 0
+    requests_before = getattr(ctx, "request_count", 0)
 
     for page_url in _candidate_urls(ctx):
         if requests_used >= _MAX_REQUESTS:
@@ -367,3 +368,4 @@ def run(ctx: object) -> None:
                     ),
                     category="error-disclosure",
                 )
+    return max(0, getattr(ctx, "request_count", 0) - requests_before)

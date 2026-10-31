@@ -1,6 +1,6 @@
 # SiteAudit
 
-SiteAudit is a small, self-contained command-line web security checker written in Python. It combines bounded same-host crawling, HTTPS and security-header checks, selected web-server exposure checks, low-impact tests for reflected input and database error indicators, and a local literal-match template runner inspired by Nuclei's template-driven approach.
+SiteAudit is a self-contained command-line web security checker written in Python. One CLI runs a bounded same-host crawl, HTTPS/header/cookie checks, Nikto-style server exposure checks, Wapiti-style input indicators, ZAP-inspired passive response rules, W3AF-inspired modular checks, and a local literal-match template runner inspired by Nuclei.
 
 It is an educational starter project, not a replacement for a professional penetration test or for mature scanners such as OWASP ZAP, Nuclei, Nikto, or Wapiti. It does not claim to find every vulnerability. Findings include the URL, observed evidence, severity, confidence, and a suggested fix.
 
@@ -37,14 +37,18 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 
 - HTTPS availability, redirect behavior, security headers, and cookie flags.
 - Same-host page discovery with configurable depth and page/request limits.
+- Bounded in-memory response cache (up to 100 responses and 2 MB) for passive checks of mixed content, weak CSP, stack-trace leakage, and CORS headers.
 - A small curated set of common web-server exposure and configuration checks.
 - Low-impact GET-only checks on discovered query parameters for reflected input and common database error indicators.
+- A small modular W3AF-inspired plugin set for credentialed arbitrary-origin CORS reflection and POST forms with no recognizable CSRF token field; forms are inspected but never submitted.
 - Local JSON-template checks with strict GET/HEAD methods and literal response matchers; templates cannot execute code or define arbitrary payloads.
 - JSON report with severity, confidence, evidence, URL, remediation guidance, and references for template findings.
 
 The bundled templates look for the Go pprof profile index, Spring Boot Actuator mappings, and Django's technical 404 page with debug mode enabled. These detect exposed diagnostic surfaces; they are not a general CVE database.
 
-The scanner does not authenticate, submit POST forms, brute force, exploit remote code execution, attempt SSRF callbacks, upload files, or intentionally test state-changing actions. It cannot guarantee that an application-specific GET route is side-effect free. Its small local rule pack is not compatible with or equivalent to Nuclei's large community CVE template library; it also does not include ZAP's proxy/active rules or W3AF's plugin ecosystem. TLS and application behavior vary; verify important findings manually.
+See [FEATURES.md](FEATURES.md) for the coverage map against the tools that inspired this project.
+
+The scanner does not authenticate, submit POST forms, brute force, exploit remote code execution, attempt SSRF callbacks, upload files, or intentionally test state-changing actions. It cannot guarantee that an application-specific GET route is side-effect free. Its small local rule pack is not compatible with or equivalent to Nuclei's large community CVE template library; it also does not include ZAP's intercepting proxy or full active/passive rule set, nor W3AF's broad plugin ecosystem. The W3AF-inspired registry currently contains two focused checks, not hundreds. TLS and application behavior vary; verify important findings manually.
 
 ## Development
 
