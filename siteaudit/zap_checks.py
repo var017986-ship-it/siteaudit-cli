@@ -106,6 +106,30 @@ def _responses(ctx):
             yield getattr(response, "url", ""), response
 
 
+def _media_type(response) -> str:
+    headers = getattr(response, "headers", {}) or {}
+    value = next(
+        (str(value) for key, value in headers.items() if str(key).lower() == "content-type"),
+        "",
+    )
+    return value.split(";", 1)[0].strip().lower()
+
+
+def _is_html_document(response) -> bool:
+    return _media_type(response) in {"text/html", "application/xhtml+xml"}
+
+
+def _supports_error_disclosure_check(response) -> bool:
+    media_type = _media_type(response)
+    return (
+        media_type in {
+            "text/html", "application/xhtml+xml", "application/json",
+            "application/problem+json", "text/plain", "application/xml", "text/xml",
+        }
+        or (media_type.startswith("application/") and media_type.endswith(("+json", "+xml")))
+    )
+
+
 def _check_mixed_content(ctx, page_url: str, response) -> None:
     if urlsplit(page_url).scheme.lower() != "https":
         return
@@ -258,7 +282,9 @@ def run(ctx) -> int:
         checked += 1
         headers = getattr(response, "headers", {}) or {}
         _check_mixed_content(ctx, page_url, response)
-        _check_csp(ctx, page_url, headers)
+        if _is_html_document(response):
+            _check_csp(ctx, page_url, headers)
         _check_cors(ctx, page_url, headers)
-        _check_error_disclosure(ctx, page_url, response)
+        if _supports_error_disclosure_check(response):
+            _check_error_disclosure(ctx, page_url, response)
     return checked

@@ -50,32 +50,56 @@ def _finding(ctx: ScanContext, finding_id: str, title: str, severity: str, confi
     ctx.add_finding(id=finding_id, title=title, severity=severity, confidence=confidence, url=url, evidence=evidence, recommendation=recommendation, category=category)
 
 
-def _check_headers(ctx: ScanContext, response: ScanResponse) -> None:
+def _media_type(headers: dict[str, str]) -> str:
+    content_type = headers.get("content-type", "")
+    return content_type.split(";", 1)[0].strip().lower()
+
+
+def _check_headers(ctx: ScanContext, response: ScanResponse, *, is_root: bool = False) -> None:
     if response.error or response.status_code is None:
         return
     headers = response.headers
     url = response.url
     https = urlsplit(url).scheme == "https"
-    checks = [
-        ("content-security-policy", "Missing Content-Security-Policy", "medium", "Set a policy that limits script, style, frame, and object sources; begin with Report-Only if needed."),
-        ("x-content-type-options", "Missing X-Content-Type-Options", "low", "Set X-Content-Type-Options: nosniff."),
-        ("referrer-policy", "Missing Referrer-Policy", "low", "Set a policy such as strict-origin-when-cross-origin."),
-        ("permissions-policy", "Missing Permissions-Policy", "info", "Set a Permissions-Policy that disables browser features the site does not use."),
-    ]
+    is_document = _media_type(headers) in {"text/html", "application/xhtml+xml"}
+    checks = [("x-content-type-options", "Missing X-Content-Type-Options", "low", "Set X-Content-Type-Options: nosniff.")]
+    if is_document:
+        checks.extend([
+            ("content-security-policy", "Missing Content-Security-Policy", "medium", "Set a policy that limits script, style, frame, and object sources; begin with Report-Only if needed."),
+            ("referrer-policy", "Missing Referrer-Policy", "low", "Set a policy such as strict-origin-when-cross-origin."),
+            ("permissions-policy", "Missing Permissions-Policy", "info", "Set a Permissions-Policy that disables browser features the site does not use."),
+        ])
     for name, title, severity, recommendation in checks:
         if name not in headers:
             _finding(ctx, f"header.{name}", title, severity, "high", url, f"HTTP response did not include {name}.", recommendation)
-    if "x-frame-options" not in headers and "frame-ancestors" not in headers.get("content-security-policy", "").lower():
+    if is_document and "x-frame-options" not in headers and "frame-ancestors" not in headers.get("content-security-policy", "").lower():
         _finding(ctx, "header.frame-protection", "Missing clickjacking frame protection", "low", "medium", url, "Neither X-Frame-Options nor CSP frame-ancestors was present.", "Set Content-Security-Policy frame-ancestors, or X-Frame-Options for legacy browser support.")
-    if https and "strict-transport-security" not in headers:
-        _finding(ctx, "header.hsts", "Missing Strict-Transport-Security", "medium", "high", url, "HTTPS response did not include Strict-Transport-Security.", "After confirming HTTPS works across the site, set an appropriate HSTS max-age; include subdomains only if they support HTTPS." )
-    if not https:
+    if is_root and not https:
         _finding(ctx, "transport.http", "Target is served over HTTP", "high", "high", url, "The selected page URL uses HTTP, so the connection is not encrypted.", "Serve the site over HTTPS and redirect HTTP requests to HTTPS.", "transport")
     server = headers.get("server")
     powered = headers.get("x-powered-by")
     if server or powered:
         details = "; ".join(f"{key}: {value[:120]}" for key, value in (("Server", server), ("X-Powered-By", powered)) if value)
-        _finding(ctx, "header.version-disclosure", "Server technology disclosed in response headers", "info", "high", url, details, "Remove or generalize version-bearing server and framework headers where practical.")
+        duplicate = any(item.id == "header.version-disclosure" and item.evidence == details for item in ctx.findings)
+        if not duplicate:
+            _finding(ctx, "header.version-disclosure", "Server technology disclosed in response headers", "info", "high", url, details, "Remove or generalize version-bearing server and framework headers where practical.")
+
+
+def _check_hsts(ctx: ScanContext, response: ScanResponse) -> None:
+    if response.error or response.status_code is None:
+        return
+    if urlsplit(response.url).scheme != "https" or "strict-transport-security" in response.headers:
+        return
+    _finding(
+        ctx,
+        "header.hsts",
+        "Missing Strict-Transport-Security",
+        "medium",
+        "high",
+        response.url,
+        "HTTPS response from the origin root did not include Strict-Transport-Security.",
+        "After confirming HTTPS works across the site, set an appropriate HSTS max-age; include subdomains only if they support HTTPS.",
+    )
 
 
 def _check_cookies(ctx: ScanContext, response: ScanResponse) -> None:
@@ -131,16 +155,56 @@ def crawl(ctx: ScanContext) -> None:
         ctx.record_response(response)
         ctx.discovered_urls.append(response.url)
         if depth == 0:
-            _check_headers(ctx, response)
+            _check_headers(ctx, response, is_root=True)
             _check_cookies(ctx, response)
+            if urlsplit(response.url).scheme == "https":
+                response_parts = urlsplit(response.url)
+                if response_parts.path in {"", "/"}:
+                    _check_hsts(ctx, response)
+                else:
+                    origin_root = urlunsplit((response_parts.scheme, response_parts.netloc, "/", "", ""))
+                    try:
+                        hsts_response = ctx.request("HEAD", origin_root, max_bytes=0)
+                    except Exception:
+                        hsts_response = None
+                    if hsts_response is not None:
+                        _check_hsts(ctx, hsts_response)
             if response.error:
                 message = response.error
-                tls_issue = any(term in message.lower() for term in ("certificate", "ssl", "tls", "handshake"))
-                _finding(ctx, "connection.tls" if tls_issue else "connection.failed", "TLS certificate or connection validation failed" if tls_issue else "Could not fetch target page", "high" if tls_issue else "info", "high", current, message, "Fix the TLS certificate or check whether the target is reachable from this machine.", "transport")
+                normalized_error = message.lower()
+                certificate_failure_markers = (
+                    "certificate_verify_failed",
+                    "certificate verify failed",
+                    "certificate has expired",
+                    "certificate expired",
+                    "self signed certificate",
+                    "self-signed certificate",
+                    "unable to get local issuer certificate",
+                    "unable to verify the first certificate",
+                    "hostname mismatch",
+                    "certificate is not valid for",
+                    "ip address mismatch",
+                    "doesn't match the host",
+                    "does not match the host",
+                )
+                certificate_issue = any(marker in normalized_error for marker in certificate_failure_markers)
+                tls_transport_issue = any(term in normalized_error for term in ("ssl", "tls", "handshake"))
+                finding_id = "connection.tls" if certificate_issue else "connection.failed"
+                title = "TLS certificate validation failed" if certificate_issue else "Could not fetch target page"
+                severity = "high" if certificate_issue else "info"
+                recommendation = (
+                    "Fix the site's TLS certificate chain or hostname configuration."
+                    if certificate_issue
+                    else "Check target availability, DNS, firewall rules, and TLS/network connectivity from this machine."
+                )
+                if tls_transport_issue and not certificate_issue:
+                    recommendation = "Check TLS negotiation and network connectivity from this machine. A timeout alone does not establish a certificate problem."
+                _finding(ctx, finding_id, title, severity, "high", current, message, recommendation, "transport")
         if response.error or response.status_code is None:
             continue
-        _check_headers(ctx, response)
-        _check_cookies(ctx, response)
+        if depth > 0:
+            _check_headers(ctx, response)
+            _check_cookies(ctx, response)
         content_type = response.headers.get("content-type", "")
         if depth >= max_depth or "html" not in content_type.lower():
             continue
