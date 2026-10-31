@@ -23,6 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=10, help="HTTP timeout in seconds (1-60, default: 10)")
     parser.add_argument("--passive", action="store_true", help="Skip active templates and probes; crawl and inspect fetched responses only")
     parser.add_argument("--post-probes", action="store_true", help="Send one inert marker POST per discovered form; may change target data and requires authorization")
+    parser.add_argument("--templates-file", help="Load additional safe JSON templates from a local file")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     return parser
 
@@ -38,6 +39,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--timeout must be between 1 and 60 seconds")
     if args.passive and args.post_probes:
         parser.error("--post-probes cannot be used with --passive")
+    if args.passive and args.templates_file:
+        parser.error("--templates-file requires active scanning and cannot be used with --passive")
 
 
 def run_scan(args: argparse.Namespace) -> dict:
@@ -50,12 +53,17 @@ def run_scan(args: argparse.Namespace) -> dict:
         "allow_private": args.allow_private,
         "passive": args.passive,
         "allow_post_probes": args.post_probes,
+        "templates_file": args.templates_file,
         "max_response_bytes": 131072,
         "max_requests": max(80, args.max_pages * 8),
         "max_cached_responses": 100,
         "max_cached_response_bytes": 2_000_000,
     }
     ctx = ScanContext(args.target, options)
+
+    if not args.passive:
+        from .template_engine import prepare as prepare_templates
+        prepare_templates(ctx)
 
     # The core discovery phase builds the bounded URL/form scope shared by the plugins.
     run_core(ctx)
@@ -70,7 +78,7 @@ def run_scan(args: argparse.Namespace) -> dict:
         "target": redact_url(ctx.base_url),
         "started_at": started.isoformat(),
         "completed_at": finished.isoformat(),
-        "settings": options,
+        "settings": {**{key: value for key, value in options.items() if key != "templates_file"}, "custom_templates_enabled": bool(args.templates_file)},
         "summary": {"findings": len(findings), "severity_counts": counts, "pages_visited": len(ctx.discovered_urls), "requests_sent": ctx.request_count, "responses_cached": len(ctx.discovered_responses), "response_cache_limited": ctx.response_cache_limited, "plugin_results": plugin_results},
         "findings": [item.to_dict() for item in findings],
     }

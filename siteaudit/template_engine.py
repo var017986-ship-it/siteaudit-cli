@@ -7,6 +7,7 @@ regex, script, payload-generation, callback, or exploit support.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -53,6 +54,8 @@ def _validate_template(template: Any, index: int) -> dict[str, Any]:
     path = _require_string(template["path"], f"{rule_id}.path", maximum=500)
     parts = urlsplit(path)
     decoded_path = unquote(parts.path)
+    if re.search(r"%[0-9a-f]{2}", decoded_path, flags=re.IGNORECASE):
+        raise ValueError(f"Template {rule_id!r} path uses nested percent-encoding")
     segments = decoded_path.replace("\\", "/").split("/")
     if (not path.startswith("/") or path.startswith("//") or parts.scheme or parts.netloc
             or parts.query or parts.fragment or "\\" in path or "\x00" in path
@@ -130,26 +133,52 @@ def _validate_template(template: Any, index: int) -> dict[str, Any]:
     }
 
 
-def _load_templates() -> list[dict[str, Any]]:
+def _load_template_file(path: Path, label: str) -> list[dict[str, Any]]:
     try:
-        if _DATA_FILE.stat().st_size > _MAX_FILE_BYTES:
-            raise ValueError("Template file exceeds the 256 KB limit")
-        payload = json.loads(_DATA_FILE.read_text(encoding="utf-8"))
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_FILE_BYTES + 1)
     except FileNotFoundError as exc:
-        raise ValueError("Built-in template pack is missing from this installation") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Could not load built-in templates: {exc}") from exc
+        raise ValueError(f"Template file ({label}) does not exist: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"Could not read template file ({label}) at {path}: {exc}") from exc
+    if len(raw) > _MAX_FILE_BYTES:
+        raise ValueError(f"Template file ({label}) exceeds the 256 KB limit: {path}")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not load template file ({label}) at {path}: {exc}") from exc
 
-    if (not isinstance(payload, dict) or isinstance(payload.get("schema_version"), bool)
-            or payload.get("schema_version") != 1):
-        raise ValueError("Unsupported built-in template schema")
+    if (not isinstance(payload, dict) or set(payload) != {"schema_version", "templates"}
+            or isinstance(payload.get("schema_version"), bool) or payload.get("schema_version") != 1):
+        raise ValueError(f"Unsupported template schema in {label} file: {path}")
     raw_templates = payload.get("templates")
     if not isinstance(raw_templates, list) or len(raw_templates) > _MAX_TEMPLATES:
-        raise ValueError("Template set must contain no more than 32 entries")
-    templates = [_validate_template(template, index) for index, template in enumerate(raw_templates)]
+        raise ValueError(f"Template file ({label}) must contain no more than 32 entries: {path}")
+    return [_validate_template(template, index) for index, template in enumerate(raw_templates)]
+
+
+def _load_templates(ctx: Any) -> list[dict[str, Any]]:
+    templates = _load_template_file(_DATA_FILE, "built-in")
+    user_file = (getattr(ctx, "options", {}) or {}).get("templates_file")
+    if user_file is not None:
+        try:
+            user_path = Path(user_file)
+        except (TypeError, ValueError, OSError) as exc:
+            raise ValueError("--templates-file must be a valid local filesystem path") from exc
+        templates.extend(_load_template_file(user_path, "user"))
+
+    if len(templates) > _MAX_TEMPLATES:
+        raise ValueError("Combined built-in and user template set must contain no more than 32 entries")
     ids = [template["id"] for template in templates]
     if len(ids) != len(set(ids)):
-        raise ValueError("Template IDs must be unique")
+        raise ValueError("Template IDs must be unique across built-in and user template files")
+
+    for template in templates:
+        target_url = _target_url(ctx, template["path"])
+        target_parts = urlsplit(target_url)
+        decoded_target = urlunsplit((target_parts.scheme, target_parts.netloc, unquote(target_parts.path), target_parts.query, ""))
+        if ctx._looks_stateful(decoded_target):
+            raise ValueError(f"Template {template['id']!r} uses a known state-changing path")
     return templates
 
 
@@ -200,9 +229,18 @@ def _match_rule(template: dict[str, Any], response: Any) -> tuple[bool, list[str
     return matched, observations if matched else []
 
 
+def prepare(ctx: Any) -> int:
+    """Validate all active templates before the CLI sends any scan requests."""
+    templates = _load_templates(ctx)
+    ctx._validated_templates = templates
+    return len(templates)
+
+
 def run(ctx: Any) -> int:
     """Apply safe, fixed-path literal templates and append matching findings."""
-    templates = _load_templates()
+    templates = getattr(ctx, "_validated_templates", None)
+    if templates is None:
+        templates = _load_templates(ctx)
     if not templates:
         return 0
 

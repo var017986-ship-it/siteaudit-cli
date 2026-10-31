@@ -30,4 +30,5 @@ class Finding:
     def to_dict(self) -> dict[str, Any]:
         finding = asdict(self)
         finding["url"] = redact_url(self.url)
+        finding["references"] = [redact_url(reference) for reference in self.references]
         return finding
