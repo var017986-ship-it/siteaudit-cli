@@ -88,18 +88,56 @@ def _check_headers(ctx: ScanContext, response: ScanResponse, *, is_root: bool = 
 def _check_hsts(ctx: ScanContext, response: ScanResponse) -> None:
     if response.error or response.status_code is None:
         return
-    if urlsplit(response.url).scheme != "https" or "strict-transport-security" in response.headers:
+    if urlsplit(response.url).scheme != "https":
         return
-    _finding(
-        ctx,
-        "header.hsts",
-        "Missing Strict-Transport-Security",
-        "medium",
-        "high",
-        response.url,
-        "HTTPS response from the origin root did not include Strict-Transport-Security.",
-        "After confirming HTTPS works across the site, set an appropriate HSTS max-age; include subdomains only if they support HTTPS.",
-    )
+
+    raw_policy = response.headers.get("strict-transport-security", "")
+    if not raw_policy:
+        _finding(
+            ctx,
+            "header.hsts",
+            "Missing Strict-Transport-Security",
+            "medium",
+            "high",
+            response.url,
+            "HTTPS response from the origin root did not include Strict-Transport-Security.",
+            "After confirming HTTPS works across the site, set an appropriate HSTS max-age; include subdomains only if they support HTTPS.",
+        )
+        return
+
+    max_age_values: list[str | None] = []
+    for policy_line in str(raw_policy).splitlines():
+        for directive in policy_line.split(";"):
+            name, separator, value = directive.strip().partition("=")
+            if name.strip().lower() == "max-age":
+                max_age_values.append(value.strip() if separator else None)
+
+    safe_policy = " ".join(str(raw_policy).replace("\r", " ").replace("\n", " ").split())[:160]
+    if (len(max_age_values) != 1 or max_age_values[0] is None
+            or not max_age_values[0].isascii() or not max_age_values[0].isdigit()):
+        _finding(
+            ctx,
+            "header.hsts.invalid",
+            "Strict-Transport-Security has no valid max-age directive",
+            "medium",
+            "high",
+            response.url,
+            f"The origin-root policy did not contain exactly one non-negative numeric max-age value. Observed: {safe_policy}",
+            "Set exactly one numeric max-age directive with a positive value in Strict-Transport-Security.",
+        )
+        return
+
+    if not max_age_values[0].lstrip("0"):
+        _finding(
+            ctx,
+            "header.hsts.disabled",
+            "Strict-Transport-Security explicitly disables HSTS",
+            "medium",
+            "high",
+            response.url,
+            f"The origin-root policy sets max-age=0. Observed: {safe_policy}",
+            "Use a positive HSTS max-age after confirming HTTPS works across the site; include subdomains only if they support HTTPS.",
+        )
 
 
 def _check_cookies(ctx: ScanContext, response: ScanResponse) -> None:

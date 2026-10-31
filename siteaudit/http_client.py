@@ -321,7 +321,7 @@ class ScanContext:
                         time.sleep(wait_for)
                     self._last_request_at = time.monotonic()
 
-                request_headers = {"User-Agent": "SiteAudit/0.9.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
+                request_headers = {"User-Agent": "SiteAudit/0.10.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
                 if headers:
                     request_headers.update(headers)
                 if verb == "POST":
@@ -347,6 +347,9 @@ class ScanContext:
                 set_cookies = raw.headers.get_all("Set-Cookie", [])
                 if set_cookies:
                     response_headers["set-cookie"] = "\n".join(set_cookies)
+                hsts_values = raw.headers.get_all("Strict-Transport-Security", [])
+                if len(hsts_values) > 1:
+                    response_headers["strict-transport-security"] = "\n".join(hsts_values)
                 if status in {301, 302, 303, 307, 308}:
                     location = response_headers.get("location")
                     raw.close()

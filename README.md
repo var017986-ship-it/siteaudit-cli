@@ -49,7 +49,7 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 
 ## Checks
 
-- HTTPS availability, redirect behavior, document security headers (CSP, framing, referrer, and permissions), origin-root HSTS, resource-level `nosniff`, and cookie flags.
+- HTTPS availability, redirect behavior, document security headers (CSP, framing, referrer, and permissions), origin-root HSTS presence/value, resource-level `nosniff`, and cookie flags.
 - Same-host page discovery with configurable depth and page/request limits.
 - Bounded in-memory response cache (up to 100 responses and 2 MB) for passive checks of mixed content, weak CSP, stack-trace leakage, and CORS headers.
 - A small curated set of common web-server exposure checks. Sensitive paths use bodyless HEAD requests and are compared with a random missing-path response to filter common soft-404 or single-page-app catch-all responses.
