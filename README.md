@@ -1,6 +1,6 @@
 # SiteAudit
 
-SiteAudit is a small, self-contained command-line web security checker written in Python. It combines bounded same-host crawling, HTTPS and security-header checks, selected web-server exposure checks, and low-impact tests for reflected input and database error indicators.
+SiteAudit is a small, self-contained command-line web security checker written in Python. It combines bounded same-host crawling, HTTPS and security-header checks, selected web-server exposure checks, low-impact tests for reflected input and database error indicators, and a local literal-match template runner inspired by Nuclei's template-driven approach.
 
 It is an educational starter project, not a replacement for a professional penetration test or for mature scanners such as OWASP ZAP, Nuclei, Nikto, or Wapiti. It does not claim to find every vulnerability. Findings include the URL, observed evidence, severity, confidence, and a suggested fix.
 
@@ -31,7 +31,7 @@ Or without installing the console command:
 python -m siteaudit https://example.com --output report.json
 ```
 
-Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode options. The default run performs bounded GET/HEAD/OPTIONS checks; `--passive` skips targeted server-path and input probes. Private and loopback IPs require `--allow-private`. Review the target and options before each scan. Query values are redacted in saved URLs, but reports can still contain hostnames and server metadata.
+Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode options. The default run performs bounded GET/HEAD/OPTIONS checks; `--passive` skips template, server-path, and input probes. Private and loopback IPs require `--allow-private`. Review the target and options before each scan. Query values are redacted in saved URLs, but reports can still contain hostnames and server metadata.
 
 ## Checks
 
@@ -39,9 +39,12 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 - Same-host page discovery with configurable depth and page/request limits.
 - A small curated set of common web-server exposure and configuration checks.
 - Low-impact GET-only checks on discovered query parameters for reflected input and common database error indicators.
-- JSON report with severity, confidence, evidence, URL, and remediation guidance.
+- Local JSON-template checks with strict GET/HEAD methods and literal response matchers; templates cannot execute code or define arbitrary payloads.
+- JSON report with severity, confidence, evidence, URL, remediation guidance, and references for template findings.
 
-The scanner does not authenticate, submit POST forms, brute force, exploit remote code execution, attempt SSRF callbacks, upload files, or intentionally test state-changing actions. It cannot guarantee that an application-specific GET route is side-effect free. It does not include the large community CVE template library from Nuclei, ZAP's proxy/active rules, or W3AF's plugin ecosystem. TLS and application behavior vary; verify important findings manually.
+The bundled templates look for the Go pprof profile index, Spring Boot Actuator mappings, and Django's technical 404 page with debug mode enabled. These detect exposed diagnostic surfaces; they are not a general CVE database.
+
+The scanner does not authenticate, submit POST forms, brute force, exploit remote code execution, attempt SSRF callbacks, upload files, or intentionally test state-changing actions. It cannot guarantee that an application-specific GET route is side-effect free. Its small local rule pack is not compatible with or equivalent to Nuclei's large community CVE template library; it also does not include ZAP's proxy/active rules or W3AF's plugin ecosystem. TLS and application behavior vary; verify important findings manually.
 
 ## Development
 

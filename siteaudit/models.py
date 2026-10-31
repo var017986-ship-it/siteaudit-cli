@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -25,6 +25,7 @@ class Finding:
     evidence: str
     recommendation: str
     category: str
+    references: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         finding = asdict(self)

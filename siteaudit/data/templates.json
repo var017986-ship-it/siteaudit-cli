@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "id": "go.pprof.index-public",
+      "name": "Go pprof profile index is publicly reachable",
+      "severity": "low",
+      "confidence": "high",
+      "category": "debug-endpoint-exposure",
+      "method": "GET",
+      "path": "/debug/pprof/",
+      "max_bytes": 16384,
+      "match": {
+        "status": [200],
+        "body_contains": [
+          "Types of profiles available:",
+          "goroutine?debug=2"
+        ],
+        "condition": "all"
+      },
+      "evidence": "The response matches the Go net/http/pprof profile index and advertises runtime profiles. The check does not request profile or trace data.",
+      "remediation": "Restrict pprof to localhost or an authenticated management network. Remove the public route if runtime profiling is not required.",
+      "references": [
+        "https://go.dev/src/net/http/pprof/pprof.go"
+      ]
+    },
+    {
+      "id": "spring.actuator.mappings-public",
+      "name": "Spring Boot Actuator mappings endpoint is publicly reachable",
+      "severity": "low",
+      "confidence": "high",
+      "category": "management-endpoint-exposure",
+      "method": "GET",
+      "path": "/actuator/mappings",
+      "max_bytes": 32768,
+      "match": {
+        "status": [200],
+        "headers": [
+          {
+            "name": "content-type",
+            "contains": "json"
+          }
+        ],
+        "body_contains": [
+          "\"contexts\"",
+          "\"mappings\""
+        ],
+        "condition": "all"
+      },
+      "evidence": "The response matches the Spring Boot Actuator mappings structure, which lists application request mappings. This confirms the management endpoint is reachable; review whether that information should be public.",
+      "remediation": "Disable the mappings endpoint or restrict Actuator endpoints to authenticated users and a trusted management network.",
+      "references": [
+        "https://docs.spring.io/spring-boot/4.0/reference/actuator/endpoints.html",
+        "https://docs.spring.io/spring-boot/api/rest/actuator/mappings.html"
+      ]
+    },
+    {
+      "id": "django.debug.technical-404",
+      "name": "Django technical 404 page indicates DEBUG mode is enabled",
+      "severity": "medium",
+      "confidence": "high",
+      "category": "debug-mode-exposure",
+      "method": "GET",
+      "path": "/siteaudit-missing-route-check-9f31c2",
+      "max_bytes": 32768,
+      "match": {
+        "status": [404],
+        "body_contains": [
+          "DEBUG = True",
+          "Django tried these URL patterns"
+        ],
+        "condition": "all"
+      },
+      "evidence": "The missing-route response contains Django's technical 404 diagnostics and explicitly reports DEBUG = True. The page can disclose URL patterns and request metadata.",
+      "remediation": "Set DEBUG=False in production and configure a standard 404 handler. Keep debug diagnostics available only in a development environment.",
+      "references": [
+        "https://github.com/django/django/blob/main/django/views/templates/technical_404.html"
+      ]
+    }
+  ]
+}

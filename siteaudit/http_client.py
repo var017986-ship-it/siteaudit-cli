@@ -188,6 +188,19 @@ class ScanContext:
         # lookup from rebinding the target between validation and connect().
         return sorted(parsed_addresses, key=lambda ip: (ip.version, ip.packed))[0].compressed
 
+    @staticmethod
+    def _looks_stateful(url: str) -> bool:
+        parsed = urlsplit(url)
+        verbs = {"logout", "signout", "delete", "remove", "unsubscribe", "purchase", "checkout", "payment", "pay", "cancel", "deactivate", "reset", "transfer", "submit", "destroy", "revoke"}
+        if any(word in parsed.path.lower() for word in verbs):
+            return True
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            key_words = set(key.lower().replace("-", "_").split("_"))
+            value_words = set(value.lower().replace("-", "_").replace("/", "_").split("_"))
+            if key_words & verbs or value_words & verbs:
+                return True
+        return False
+
     def add_finding(self, **fields: Any) -> Finding:
         finding = Finding(**fields)
         identity = (finding.id, finding.url, finding.title)
@@ -203,6 +216,7 @@ class ScanContext:
         data: Any = None,
         headers: dict[str, str] | None = None,
         max_bytes: int | None = None,
+        follow_redirects: bool = True,
     ) -> ScanResponse:
         verb = method.upper()
         if verb not in {"GET", "HEAD", "OPTIONS"}:
@@ -235,7 +249,7 @@ class ScanContext:
                         time.sleep(wait_for)
                     self._last_request_at = time.monotonic()
 
-                request_headers = {"User-Agent": "SiteAudit/0.1.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
+                request_headers = {"User-Agent": "SiteAudit/0.2.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
                 if headers:
                     request_headers.update(headers)
                 req = Request(target, headers=request_headers, method=verb)
@@ -261,10 +275,14 @@ class ScanContext:
                     if not location:
                         return ScanResponse(url=target, status_code=status, headers=response_headers)
                     next_url = urljoin(target, location)
+                    if not follow_redirects:
+                        return ScanResponse(url=target, status_code=status, headers=response_headers, error="Redirect following is disabled for this request")
                     try:
                         self._check_scope(next_url)
                     except ValueError:
                         return ScanResponse(url=target, status_code=status, headers=response_headers, error="Out-of-scope redirect was blocked")
+                    if self._looks_stateful(next_url):
+                        return ScanResponse(url=target, status_code=status, headers=response_headers, error="Potential state-changing redirect was blocked")
                     if redirect_count == 4:
                         return ScanResponse(url=target, status_code=status, headers=response_headers, error="Redirect limit reached")
                     target = next_url

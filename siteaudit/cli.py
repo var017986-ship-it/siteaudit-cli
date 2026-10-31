@@ -20,7 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum crawl depth (0-8, default: 2)")
     parser.add_argument("--delay", type=float, default=0.5, help="Minimum delay between requests in seconds (0.1-10, default: 0.5)")
     parser.add_argument("--timeout", type=float, default=10, help="HTTP timeout in seconds (1-60, default: 10)")
-    parser.add_argument("--passive", action="store_true", help="Skip targeted server-path and input probes; crawl and inspect fetched responses only")
+    parser.add_argument("--passive", action="store_true", help="Skip template, server-path, and input probes; crawl and inspect fetched responses only")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     return parser
 
@@ -47,14 +47,18 @@ def run_scan(args: argparse.Namespace) -> dict:
         "passive": args.passive,
         "max_response_bytes": 131072,
         "max_requests": max(80, args.max_pages * 8),
+        "template_checks_enabled": not args.passive,
     }
     ctx = ScanContext(args.target, options)
 
     # The core discovery phase builds the bounded URL/form scope shared by the plugins.
     run_core(ctx)
+    template_checks_attempted = 0
     if not args.passive:
+        from .template_engine import run as run_templates
         from .nikto_checks import run as run_nikto
         from .wapiti_checks import run as run_wapiti
+        template_checks_attempted = run_templates(ctx)
         run_nikto(ctx)
         run_wapiti(ctx)
 
@@ -67,7 +71,7 @@ def run_scan(args: argparse.Namespace) -> dict:
         "started_at": started.isoformat(),
         "completed_at": finished.isoformat(),
         "settings": options,
-        "summary": {"findings": len(findings), "severity_counts": counts, "pages_visited": len(ctx.discovered_urls), "requests_sent": ctx.request_count},
+        "summary": {"findings": len(findings), "severity_counts": counts, "pages_visited": len(ctx.discovered_urls), "requests_sent": ctx.request_count, "template_checks_attempted": template_checks_attempted},
         "findings": [item.to_dict() for item in findings],
     }
 

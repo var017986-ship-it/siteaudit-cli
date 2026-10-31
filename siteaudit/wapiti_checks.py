@@ -161,7 +161,7 @@ def _status_code(response: object) -> int | None:
 
 def _request(ctx: object, url: str) -> object | None:
     try:
-        return ctx.request("GET", url, max_bytes=_MAX_RESPONSE_BYTES)  # type: ignore[attr-defined]
+        return ctx.request("GET", url, max_bytes=_MAX_RESPONSE_BYTES, follow_redirects=False)  # type: ignore[attr-defined]
     except Exception:
         # Network and policy errors are local to this probe; other checks can continue.
         return None

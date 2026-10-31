@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "siteaudit-cli"
-version = "0.1.0"
+version = "0.2.0"
 description = "A bounded, low-impact web security checker CLI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,3 +17,6 @@ siteaudit = "siteaudit.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["siteaudit*"]
+
+[tool.setuptools.package-data]
+siteaudit = ["data/*.json"]
