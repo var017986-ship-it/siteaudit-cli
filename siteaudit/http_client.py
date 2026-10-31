@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import http.client
+import re
 import socket
 import ssl
 import threading
@@ -243,10 +244,27 @@ class ScanContext:
         follow_redirects: bool = True,
     ) -> ScanResponse:
         verb = method.upper()
-        if verb not in {"GET", "HEAD", "OPTIONS"}:
-            return ScanResponse(url=url, error=f"HTTP method {verb} is blocked; only GET, HEAD, and OPTIONS are allowed")
-        if data is not None:
-            return ScanResponse(url=url, error="Request bodies are blocked; only read-only probes are allowed")
+        if verb not in {"GET", "HEAD", "OPTIONS", "POST"}:
+            return ScanResponse(url=url, error=f"HTTP method {verb} is blocked")
+        if verb == "POST":
+            if not self.options.get("allow_post_probes"):
+                return ScanResponse(url=url, error="POST probes require the explicit --post-probes option")
+            if follow_redirects:
+                return ScanResponse(url=url, error="POST probes must not follow redirects")
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            if not isinstance(data, bytes) or len(data) > 4096:
+                return ScanResponse(url=url, error="POST probes require a form body no larger than 4096 bytes")
+            try:
+                fields = parse_qsl(data.decode("ascii"), keep_blank_values=True, strict_parsing=True)
+            except (UnicodeDecodeError, ValueError):
+                return ScanResponse(url=url, error="POST probes accept one URL-encoded marker field only")
+            if (len(fields) != 1 or not fields[0][0]
+                    or any(ord(char) < 32 for char in fields[0][0])
+                    or re.fullmatch(r"siteauditpost[0-9a-f]{12}", fields[0][1]) is None):
+                return ScanResponse(url=url, error="POST probes accept one URL-encoded marker field only")
+        elif data is not None:
+            return ScanResponse(url=url, error="Request bodies are blocked for this method")
 
         target = url
         if params:
@@ -273,10 +291,15 @@ class ScanContext:
                         time.sleep(wait_for)
                     self._last_request_at = time.monotonic()
 
-                request_headers = {"User-Agent": "SiteAudit/0.3.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
+                request_headers = {"User-Agent": "SiteAudit/0.4.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
                 if headers:
                     request_headers.update(headers)
-                req = Request(target, headers=request_headers, method=verb)
+                if verb == "POST":
+                    content_type = next((value for key, value in request_headers.items() if key.lower() == "content-type"), "application/x-www-form-urlencoded")
+                    if content_type.lower().split(";", 1)[0].strip() != "application/x-www-form-urlencoded":
+                        return ScanResponse(url=target, error="POST probes allow only form-urlencoded bodies")
+                    request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+                req = Request(target, data=data if verb == "POST" else None, headers=request_headers, method=verb)
                 timeout = float(self.options.get("timeout", 10))
                 try:
                     opener = build_opener(

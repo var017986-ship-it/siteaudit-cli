@@ -1,7 +1,9 @@
 """Low-impact, Wapiti-inspired checks for reflected input and SQL errors.
 
-This module deliberately limits itself to GET requests and inert marker values.
-It does not attempt to prove code execution or modify application state.
+This module uses bounded GET probes and optional one-field POST markers. It
+does not attempt to prove code execution or send exploit payloads. POST probes
+are disabled unless explicitly requested and may still trigger app-specific
+side effects.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ _STATEFUL_PATH_PARTS = (
 _REDIRECT_PARAMETER_PARTS = ("redirect", "return", "next", "continue", "dest", "url", "uri", "callback", "target")
 _REDIRECT_PROBE = "https://siteaudit.invalid/"
 _STATE_CHANGING_WORDS = {"logout", "signout", "delete", "remove", "unsubscribe", "purchase", "checkout", "payment", "pay", "cancel", "deactivate", "reset", "transfer", "submit", "destroy", "revoke"}
+_POST_MAX_FORMS = 5
+_POST_MAX_BODY_BYTES = 4096
+_POST_SENSITIVE_PARTS = ("user", "login", "name", "email", "phone", "address", "card", "ssn", "birth", "account", "recipient", "token", "csrf", "auth", "secret", "password")
 
 _SQL_ERROR_MARKERS = (
     "you have an error in your sql syntax",
@@ -201,15 +206,109 @@ def _candidate_urls(ctx: object) -> list[str]:
         if not url or not _same_host(url, ctx):
             continue
         parsed = urlsplit(url)
+        canonical = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
         if _is_stateful_url(canonical):
             continue
-        canonical = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
         if canonical not in seen:
             urls.append(canonical)
             seen.add(canonical)
         if len(urls) >= _MAX_PAGES:
             break
     return urls
+
+
+def _run_post_form_markers(ctx: object) -> None:
+    """Optionally send one inert marker to a few ordinary POST form fields.
+
+    This can still trigger application-specific POST side effects, so it is
+    disabled unless the caller explicitly sets allow_post_probes.
+    """
+    options = getattr(ctx, "options", {}) or {}
+    if not options.get("allow_post_probes"):
+        return
+
+    forms_seen: set[tuple[str, str]] = set()
+    inspected = 0
+    for form in getattr(ctx, "discovered_forms", []) or []:
+        if inspected >= _POST_MAX_FORMS:
+            break
+        if not isinstance(form, dict) or str(form.get("method", "")).upper() != "POST":
+            continue
+
+        action = form.get("action") or form.get("source_url")
+        source_url = form.get("source_url")
+        if not isinstance(action, str) or not _same_host(action, ctx) or _is_stateful_url(action):
+            continue
+        action_parts = urlsplit(action)
+        # Avoid forwarding action query values, which can contain secrets or
+        # operation selectors the scanner cannot safely interpret.
+        if action_parts.query or action_parts.fragment:
+            continue
+        if isinstance(source_url, str) and not _same_host(source_url, ctx):
+            continue
+        identity = (action, source_url if isinstance(source_url, str) else "")
+        if identity in forms_seen:
+            continue
+
+        fields = form.get("inputs", [])
+        if not isinstance(fields, list):
+            continue
+        candidate_name = ""
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            name = str(field.get("name", "")).strip()
+            input_type = str(field.get("type", "text")).lower()
+            normalized_name = name.lower().replace("-", "_")
+            if (not name or len(name) > 128 or input_type not in {"text", "search"}
+                    or _is_sensitive_key(name)
+                    or any(part in normalized_name for part in _POST_SENSITIVE_PARTS)):
+                continue
+            candidate_name = name
+            break
+        if not candidate_name:
+            continue
+
+        marker = "siteauditpost" + token_hex(6)
+        body = urlencode([(candidate_name, marker)]).encode("ascii")
+        if len(body) > _POST_MAX_BODY_BYTES:
+            continue
+        forms_seen.add(identity)
+        try:
+            response = ctx.request(
+                "POST",
+                action,
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                max_bytes=_MAX_RESPONSE_BYTES,
+                follow_redirects=False,
+            )
+        except Exception:
+            continue
+        inspected += 1
+        if response is None or getattr(response, "error", None):
+            continue
+        response_text = _response_text(response)
+        if marker not in response_text:
+            continue
+        _record(
+            ctx,
+            finding_id="potential-post-reflected-input",
+            title="POST input is reflected in the response",
+            severity="low",
+            confidence="low",
+            url=action,
+            evidence=(
+                f"A single inert marker sent to POST field {candidate_name!r} appeared in the response. "
+                "The scanner did not submit other fields; output context was not verified and this does not confirm XSS."
+            ),
+            recommendation=(
+                "Encode untrusted values for their output context and validate them server-side. "
+                "Review this form manually; the opt-in POST request may have triggered an application-specific action."
+            ),
+            category="input-validation",
+            references=["https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"],
+        )
 
 
 def _record(ctx: object, *, finding_id: str, title: str, severity: str, confidence: str,
@@ -233,9 +332,9 @@ def _record(ctx: object, *, finding_id: str, title: str, severity: str, confiden
 def run(ctx: object) -> int:
     """Run bounded inert GET probes against discovered query parameters.
 
-    Reflection is reported as a low-confidence HTML-injection indicator, not a
-    confirmed XSS. SQL diagnostics are reported only when a quote probe produces
-    a recognizable server error that was absent in the baseline response.
+    Reflection is reported as a low-confidence indicator, not confirmed XSS.
+    SQL diagnostics require a recognizable error absent from the baseline. A
+    caller can explicitly enable one inert marker POST per discovered form.
     """
     requests_used = 0
     requests_before = getattr(ctx, "request_count", 0)
@@ -422,4 +521,5 @@ def run(ctx: object) -> int:
                     ),
                     category="error-disclosure",
                 )
+    _run_post_form_markers(ctx)
     return max(0, getattr(ctx, "request_count", 0) - requests_before)

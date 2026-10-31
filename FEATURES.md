@@ -7,7 +7,7 @@ SiteAudit combines independent checks behind one CLI. The names below describe i
 | OWASP ZAP | Same-host crawl; passive HTTPS/header/cookie, mixed-content, weak-CSP, stack-trace and CORS observations; JSON findings | Intercepting proxy, authenticated sessions, browser/AJAX spider, full active rule set, API imports |
 | Nuclei | Three bundled, fixed-path JSON signatures with literal matchers and source references | Community CVE template library, YAML compatibility, workflows, code or network callbacks in templates |
 | Nikto | Bounded HEAD probes for a curated set of common exposed paths, plus OPTIONS method observations | Nikto's full test database, plugin collection, mutation/wordlist modes and version database |
-| Wapiti | Bounded crawler; GET parameter/form marker reflection, database error indicators, and un-followed open-redirect probes | POST submissions, authenticated crawling, upload, SSRF, XXE, time-based and other fuzzing modules |
+| Wapiti | Bounded crawler; GET marker reflection, database error indicators, un-followed open-redirect probes, and opt-in one-field POST marker checks | Authenticated crawling, upload, SSRF, XXE, time-based and broader fuzzing modules |
 | W3AF | Static plugin registry; credentialed CORS reflection check and low-confidence POST-form CSRF token-name heuristic | W3AF's broad plugin set, exploit verification, authentication profiles and audit framework |
 
 ## Shared execution model

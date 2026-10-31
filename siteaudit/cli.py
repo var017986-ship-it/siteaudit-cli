@@ -22,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--delay", type=float, default=0.5, help="Minimum delay between requests in seconds (0.1-10, default: 0.5)")
     parser.add_argument("--timeout", type=float, default=10, help="HTTP timeout in seconds (1-60, default: 10)")
     parser.add_argument("--passive", action="store_true", help="Skip active templates and probes; crawl and inspect fetched responses only")
+    parser.add_argument("--post-probes", action="store_true", help="Send one inert marker POST per discovered form; may change target data and requires authorization")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     return parser
 
@@ -35,6 +36,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--delay must be between 0.1 and 10 seconds")
     if not 1 <= args.timeout <= 60:
         parser.error("--timeout must be between 1 and 60 seconds")
+    if args.passive and args.post_probes:
+        parser.error("--post-probes cannot be used with --passive")
 
 
 def run_scan(args: argparse.Namespace) -> dict:
@@ -46,6 +49,7 @@ def run_scan(args: argparse.Namespace) -> dict:
         "timeout": args.timeout,
         "allow_private": args.allow_private,
         "passive": args.passive,
+        "allow_post_probes": args.post_probes,
         "max_response_bytes": 131072,
         "max_requests": max(80, args.max_pages * 8),
         "max_cached_responses": 100,
