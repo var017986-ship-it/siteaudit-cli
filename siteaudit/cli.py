@@ -25,7 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--post-probes", action="store_true", help="Send one inert marker POST per discovered form; may change target data and requires authorization")
     parser.add_argument("--sqli-probes", action="store_true", help="Run repeated boolean checks on up to two numeric GET parameters; may change GET query behavior")
     parser.add_argument("--graphql-probe", action="store_true", help="Send a bounded read-only GraphQL introspection query to up to three same-host endpoints")
-    parser.add_argument("--templates-file", help="Load additional safe JSON templates from a local file")
+    parser.add_argument("--templates-file", help="Load safe JSON or restricted Nuclei YAML templates from a local file")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     return parser
 

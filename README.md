@@ -45,7 +45,7 @@ To optionally check whether a GraphQL endpoint exposes its query type through in
 siteaudit https://example.com --graphql-probe --output report.json
 ```
 
-Add reviewed local JSON signatures with `--templates-file`; see [docs/custom-templates.md](docs/custom-templates.md) for the restricted schema.
+Add reviewed local JSON signatures or a restricted Nuclei YAML subset with `--templates-file`; see [docs/custom-templates.md](docs/custom-templates.md) for supported fields. YAML imports require `python -m pip install -e ".[yaml]"`.
 
 Or without installing the console command:
 
@@ -66,18 +66,18 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 - A small modular W3AF-inspired plugin set for credentialed arbitrary-origin CORS reflection and POST forms with no recognizable CSRF token field; this CSRF heuristic never submits forms.
 - Optional GraphQL introspection check using one fixed read-only query on up to three same-host endpoints; the schema is not saved and the result is informational.
 - Local JSON-template checks with strict GET/HEAD methods and literal response matchers; templates cannot execute code or define arbitrary payloads.
-- Up to 23 additional reviewed local JSON templates through `--templates-file` (32 combined with the nine bundled rules).
+- Up to 23 additional reviewed local rules through `--templates-file`; JSON is always available, and an optional restricted Nuclei YAML importer accepts fixed GET/HEAD paths and positive body-word/status matchers (32 combined with the nine bundled rules).
 - JSON report with severity, confidence, evidence, URL, remediation guidance, and references for template findings.
 
 The nine bundled templates check the Go pprof index and expvar metrics, Spring Boot Actuator mappings, Django's debug 404, public OpenAPI specifications at two common paths, Git repository configuration, PHP configuration information, and Apache server status. API documentation is informational because it is often intentionally public. Response bodies are inspected for fixed signatures but are not copied into findings; these rules detect selected exposure surfaces and are not a general CVE database.
 
 See [FEATURES.md](FEATURES.md) for the coverage map against the tools that inspired this project.
 
-The scanner does not authenticate, brute force, exploit remote code execution, attempt SSRF callbacks, upload files, or intentionally test state-changing actions. Optional POST probes are limited to one inert marker field per form or one fixed read-only GraphQL introspection query per endpoint. It cannot guarantee that application-specific GET or POST routes are side-effect free. Its small local rule pack is not compatible with or equivalent to Nuclei's large community CVE template library; it also does not include ZAP's intercepting proxy or full active/passive rule set, nor W3AF's broad plugin ecosystem. The W3AF-inspired registry currently contains two focused checks, not hundreds. TLS and application behavior vary; verify important findings manually.
+The scanner does not authenticate, brute force, exploit remote code execution, attempt SSRF callbacks, upload files, or intentionally test state-changing actions. Optional POST probes are limited to one inert marker field per form or one fixed read-only GraphQL introspection query per endpoint. It cannot guarantee that application-specific GET or POST routes are side-effect free. Its small local rule pack and restricted YAML importer are not compatible with or equivalent to Nuclei's large community CVE template library; it also does not include ZAP's intercepting proxy or full active/passive rule set, nor W3AF's broad plugin ecosystem. The W3AF-inspired registry currently contains two focused checks, not hundreds. TLS and application behavior vary; verify important findings manually.
 
 ## Development
 
-The implementation uses Python's standard library to keep installation simple. Scanner modules share a request context and a finding schema so additional checks can be added without changing the report format.
+The default installation uses Python's standard library. The optional `yaml` extra adds PyYAML only when importing restricted Nuclei YAML templates. Scanner modules share a request context and a finding schema so additional checks can be added without changing the report format.
 
 ## License
 
