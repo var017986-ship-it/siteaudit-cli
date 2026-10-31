@@ -31,7 +31,7 @@ class PluginExecutionError(RuntimeError):
     """A scanner plugin failed; the report must not imply it completed."""
 
 
-def run_plugins(ctx: Any, *, include_active: bool) -> tuple[dict[str, dict[str, Any]], list[str]]:
+def run_plugins(ctx: Any, *, include_active: bool, progress=None) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Run enabled allowlisted plugins and return results plus enabled names.
 
     A module error is surfaced with its plugin name. No plugin is silently
@@ -40,7 +40,9 @@ def run_plugins(ctx: Any, *, include_active: bool) -> tuple[dict[str, dict[str, 
     enabled = [spec for spec in PLUGIN_REGISTRY if spec.mode == "passive" or include_active]
     results: dict[str, dict[str, Any]] = {}
 
-    for spec in enabled:
+    for index, spec in enumerate(enabled, start=1):
+        if progress:
+            progress("start", index - 1, len(enabled), spec.name)
         try:
             module = import_module(f".{spec.module}", package=__package__)
             runner = getattr(module, "run", None)
@@ -58,5 +60,7 @@ def run_plugins(ctx: Any, *, include_active: bool) -> tuple[dict[str, dict[str, 
         elif isinstance(result, dict):
             plugin_result.update(result)
         results[spec.name] = plugin_result
+        if progress:
+            progress("done", index, len(enabled), spec.name)
 
     return results, [spec.name for spec in enabled]

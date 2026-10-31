@@ -95,7 +95,15 @@ def _same_origin_depth_regex(origin: str, base_path: str, max_depth: int) -> str
     return rf"^{re.escape(origin)}{path_pattern}{remainder}(?:\?[^#]*)?$"
 
 
-def _script(target: str, origin_filter: str, report_path: Path, request_timeout: int, discovery_seconds: int) -> str:
+def _script(
+    target: str,
+    origin_filter: str,
+    report_path: Path,
+    request_timeout: int,
+    discovery_seconds: int,
+    proxy_host: str,
+    proxy_port: int,
+) -> str:
     # W3AF documents one console command per line. Only the crawl, audit, grep,
     # and XML-output groups are configured; exploit/bruteforce/evasion/mangle
     # are never entered.
@@ -123,6 +131,8 @@ def _script(target: str, origin_filter: str, report_path: Path, request_timeout:
         "http-settings",
         f"set timeout {request_timeout}",
         "set max_requests_per_second 1",
+        f"set proxy_address {proxy_host}",
+        f"set proxy_port {proxy_port}",
         "back",
         "misc-settings",
         f"set max_discovery_time {discovery_seconds}",
@@ -211,6 +221,12 @@ def run(ctx: Any) -> dict[str, Any]:
     request_timeout = _bounded_option(options, "timeout", 10, 1, 60)
     max_depth = _bounded_option(options, "max_depth", 2, 0, 8)
     max_pages = _bounded_option(options, "max_pages", 50, 1, 500)
+    proxy_url = options.get("external_proxy_url")
+    if not isinstance(proxy_url, str) or not proxy_url:
+        raise EngineRunError("W3AF requires the SiteAudit scope proxy")
+    proxy_parts = urlsplit(proxy_url)
+    if proxy_parts.hostname != "127.0.0.1" or proxy_parts.port is None or proxy_parts.username:
+        raise EngineRunError("W3AF requires a local unauthenticated scope proxy")
 
     # W3AF has no hard page-count option. The path-depth regex and discovery
     # deadline constrain crawl breadth; the outer timeout bounds the whole run.
@@ -225,7 +241,15 @@ def run(ctx: Any) -> dict[str, Any]:
             raise EngineRunError("Temporary path cannot be represented safely in a W3AF script")
         try:
             script_path.write_text(
-                _script(target, origin_filter, report_path, request_timeout, discovery_seconds),
+                _script(
+                    target,
+                    origin_filter,
+                    report_path,
+                    request_timeout,
+                    discovery_seconds,
+                    proxy_parts.hostname,
+                    proxy_parts.port,
+                ),
                 encoding="utf-8",
                 newline="\n",
             )
@@ -255,7 +279,7 @@ def run(ctx: Any) -> dict[str, Any]:
         "findings_imported": imported,
         "plugins": ["web_spider", "xss", "sqli", "ssl_certificate", "selected passive grep plugins"],
         "scope": "discovered links are filtered to the exact target origin and configured path depth; imported findings are scope-checked",
-        "scope_note": "Upstream redirect handling is not intercepted; smart-filled forms may submit data.",
+        "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP; HTTPS Host headers inside TLS are not inspected. Smart-filled forms may submit data.",
         "max_depth": max_depth,
         "max_pages": max_pages,
         "max_pages_enforced": False,
@@ -267,7 +291,7 @@ def run(ctx: Any) -> dict[str, Any]:
         "limitations": [
             "W3AF does not expose a hard max-pages option; discovery time and path depth are bounded instead.",
             "The W3AF crawler smart-fills discovered forms, so form submissions can change application state; use only on a staging target prepared for testing.",
-            "Redirect handling belongs to the upstream scanner and is not independently restricted by this adapter.",
+            "HTTPS Host headers are encrypted inside CONNECT tunnels and cannot be checked by the scope proxy.",
             "The upstream project is legacy and is not supported on Windows.",
         ],
     }

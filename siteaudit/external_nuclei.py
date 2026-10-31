@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -10,20 +13,83 @@ from urllib.parse import urlsplit
 from .external_support import EngineRunError, EngineUnavailable, add_engine_finding, find_executable, run_command
 
 
+_NETWORK_DSL_HELPER = re.compile(r"(?<![A-Za-z0-9_])(?:resolve|public_ip|jarm)\s*\(", re.IGNORECASE)
+_TEMPLATE_EXTENSIONS = {".yaml", ".yml", ".json"}
+_MAX_TEMPLATE_FILES = 20_000
+_MAX_TEMPLATE_BYTES = 512_000_000
+_MAX_SINGLE_TEMPLATE_BYTES = 4_000_000
+
+
+def _template_source(configured: Any) -> tuple[Path, str]:
+    if configured:
+        source = Path(configured).expanduser()
+        label = "custom local path"
+    else:
+        source = Path.home() / "nuclei-templates"
+        label = "installed default template directory"
+    if not source.exists() or not (source.is_file() or source.is_dir()):
+        raise EngineRunError(
+            f"Nuclei templates not found at {source}; set --nuclei-templates to a reviewed local file or directory"
+        )
+    if source.is_file() and source.suffix.lower() not in _TEMPLATE_EXTENSIONS:
+        raise EngineRunError("Nuclei template files must use .yaml, .yml, or .json")
+    return source.resolve(), label
+
+
+def _prepare_templates(source: Path, destination: Path) -> tuple[int, int]:
+    """Copy HTTP template inputs while excluding direct network-capable DSL helpers."""
+    destination.mkdir(parents=True, exist_ok=True)
+    files = [source] if source.is_file() else sorted(source.rglob("*"))
+    copied = 0
+    blocked = 0
+    total_bytes = 0
+    template_count = 0
+    for path in files:
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative = Path(path.name) if source.is_file() else path.relative_to(source)
+        if path.name == ".nuclei-ignore":
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+            continue
+        if path.suffix.lower() not in _TEMPLATE_EXTENSIONS:
+            continue
+        template_count += 1
+        if template_count > _MAX_TEMPLATE_FILES:
+            raise EngineRunError(f"Nuclei template directory exceeds {_MAX_TEMPLATE_FILES} files")
+        size = path.stat().st_size
+        total_bytes += size
+        if size > _MAX_SINGLE_TEMPLATE_BYTES or total_bytes > _MAX_TEMPLATE_BYTES:
+            raise EngineRunError("Nuclei template directory exceeds the local size limits")
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise EngineRunError(f"Could not read Nuclei template {path}: {exc}") from exc
+        if _NETWORK_DSL_HELPER.search(content.decode("utf-8", errors="replace")):
+            blocked += 1
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_bytes(content)
+        except OSError as exc:
+            raise EngineRunError(f"Could not prepare Nuclei template {path}: {exc}") from exc
+        copied += 1
+
+    if not copied:
+        if blocked:
+            raise EngineRunError("All Nuclei templates were excluded because they call resolve(), public_ip(), or jarm()")
+        raise EngineRunError("No Nuclei YAML or JSON templates were found in the selected path")
+    return copied, blocked
+
+
 def run(ctx: Any) -> dict[str, Any]:
-    """Run Nuclei against the selected origin with explicit local templates.
-
-    Nuclei's installed default template pack is used unless the operator
-    provides a reviewed local file or directory through ``--nuclei-templates``.
-    """
-    configured_templates = (ctx.options or {}).get("nuclei_templates")
-    templates_path: Path | None = None
-    if configured_templates:
-        templates_path = Path(configured_templates).expanduser()
-        if not templates_path.exists() or not (templates_path.is_file() or templates_path.is_dir()):
-            raise ValueError(f"Nuclei template path does not exist or is not a file/directory: {templates_path}")
-
+    """Run HTTP Nuclei templates after filtering direct network DSL helpers."""
     executable = find_executable("nuclei", "nuclei.exe")
+    configured_templates = (ctx.options or {}).get("nuclei_templates")
+    templates_path, template_source = _template_source(configured_templates)
+
     timeout = float((ctx.options or {}).get("external_engine_timeout", 300))
     request_timeout = max(1, int((ctx.options or {}).get("timeout", 10)))
     delay = max(0.1, float((ctx.options or {}).get("delay", 0.5)))
@@ -32,31 +98,38 @@ def run(ctx: Any) -> dict[str, Any]:
     # its minimum. A request delay above one second cannot be represented by
     # that option and is reported in the result metadata below.
     rate_limit = max(1, int(1 / delay))
+    proxy_url = (ctx.options or {}).get("external_proxy_url")
+    if not isinstance(proxy_url, str) or not proxy_url:
+        raise EngineRunError("Nuclei requires the SiteAudit scope proxy")
 
-    command = [
-        executable,
-        "-u", ctx.base_url,
-        "-type", "http",
-        "-jsonl",
-        "-no-color",
-        "-disable-update-check",
-        "-no-interactsh",
-        "-disable-redirects",
-        "-omit-raw",
-        "-omit-template",
-        "-rate-limit", str(rate_limit),
-        "-bulk-size", "1",
-        "-concurrency", "1",
-        "-timeout", str(request_timeout),
-        "-retries", "0",
-        "-exclude-tags", "dos,intrusive,fuzz,bruteforce",
-    ]
-    if templates_path is not None:
-        command.extend(["-t", str(templates_path.resolve())])
-    if not (ctx.options or {}).get("allow_private"):
-        command.append("-restrict-local-network-access")
+    with tempfile.TemporaryDirectory(prefix="siteaudit-nuclei-") as directory:
+        safe_templates = Path(directory) / "templates"
+        templates_used, templates_blocked = _prepare_templates(templates_path, safe_templates)
+        command = [
+            executable,
+            "-u", ctx.base_url,
+            "-type", "http",
+            "-jsonl",
+            "-no-color",
+            "-disable-update-check",
+            "-no-interactsh",
+            "-disable-redirects",
+            "-omit-raw",
+            "-omit-template",
+            "-rate-limit", str(rate_limit),
+            "-bulk-size", "1",
+            "-concurrency", "1",
+            "-timeout", str(request_timeout),
+            "-retries", "0",
+            "-exclude-tags", "dos,intrusive,fuzz,bruteforce",
+            "-proxy", proxy_url,
+            "-proxy-internal",
+            "-t", str(safe_templates),
+        ]
+        if not (ctx.options or {}).get("allow_private"):
+            command.append("-restrict-local-network-access")
 
-    process = run_command(command, timeout=timeout)
+        process = run_command(command, timeout=timeout)
     findings_added = 0
     out_of_scope = 0
     malformed_lines = 0
@@ -113,8 +186,10 @@ def run(ctx: Any) -> dict[str, Any]:
         "malformed_output_lines": malformed_lines,
         "rate_limit_per_second": rate_limit,
         "concurrency": 1,
-        "template_source": "custom local path" if templates_path is not None else "Nuclei installed default pack",
-        "scope_note": "Only results matching the selected host and port are imported. The upstream template engine is not sandboxed to that hostname; use reviewed templates.",
+        "template_source": template_source,
+        "templates_used": templates_used,
+        "templates_blocked_network_dsl": templates_blocked,
+        "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP. HTTPS Host headers inside TLS are not inspected. Templates using resolve(), public_ip(), or jarm() are excluded because Nuclei v3.11.1 can make those calls outside the proxy.",
     }
     if delay > 1:
         result["rate_limit_note"] = "Nuclei integer rate limit cannot enforce delays slower than one request per second."

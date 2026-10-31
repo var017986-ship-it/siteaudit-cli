@@ -7,6 +7,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .external_support import (
     EngineRunError,
@@ -30,6 +31,17 @@ def run(ctx: Any) -> dict[str, Any]:
     target = str(ctx.base_url)
     if scoped_url(ctx, target) is None:
         raise EngineRunError("ZAP target failed the selected host-and-port scope check")
+
+    proxy_url = (getattr(ctx, "options", {}) or {}).get("external_proxy_auth_url")
+    proxy_parts = urlsplit(proxy_url) if isinstance(proxy_url, str) else None
+    if (
+        proxy_parts is None
+        or proxy_parts.hostname != "host.docker.internal"
+        or proxy_parts.port is None
+        or not proxy_parts.username
+        or not proxy_parts.password
+    ):
+        raise EngineRunError("ZAP requires the authenticated SiteAudit Docker scope proxy")
 
     options = getattr(ctx, "options", {}) or {}
     active = options.get("zap_active") is True
@@ -59,6 +71,7 @@ def run(ctx: Any) -> dict[str, Any]:
             "--name",
             container_name,
             "--pull=never",
+            "--add-host=host.docker.internal:host-gateway",
             "--mount",
             mount,
             _IMAGE,
@@ -79,12 +92,21 @@ def run(ctx: Any) -> dict[str, Any]:
             # from config.xml. One thread per host limits target load; the
             # two duration values bound active scans and individual rules.
             active_minutes = max(1, engine_timeout // 60 - 2)
-            zap_options = (
-                "-config scanner.threadPerHost=1 "
-                f"-config scanner.maxScanDurationInMins={active_minutes} "
-                "-config scanner.maxRuleDurationInMins=1"
-            )
-            command.extend(["-z", zap_options])
+        zap_options = [
+            "-config connection.proxyChain.enabled=true",
+            f"-config connection.proxyChain.hostName={proxy_parts.hostname}",
+            f"-config connection.proxyChain.port={proxy_parts.port}",
+            "-config connection.proxyChain.authEnabled=true",
+            f"-config connection.proxyChain.userName={proxy_parts.username}",
+            f"-config connection.proxyChain.password={proxy_parts.password}",
+        ]
+        if active:
+            zap_options.extend([
+                "-config scanner.threadPerHost=1",
+                f"-config scanner.maxScanDurationInMins={active_minutes}",
+                "-config scanner.maxRuleDurationInMins=1",
+            ])
+        command.extend(["-z", " ".join(zap_options)])
 
         process = None
         process_error = None

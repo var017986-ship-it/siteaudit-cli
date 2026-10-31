@@ -39,6 +39,9 @@ def run(ctx: Any) -> dict[str, Any]:
     engine_timeout = max(1, int(options.get("external_engine_timeout", 300)))
     request_timeout = max(1, int(options.get("timeout", 10)))
     pause = max(0.1, float(options.get("delay", 0.5)))
+    proxy_url = options.get("external_proxy_url")
+    if not isinstance(proxy_url, str) or not proxy_url:
+        raise EngineRunError("Nikto requires the SiteAudit scope proxy")
 
     with tempfile.TemporaryDirectory(prefix="siteaudit-nikto-") as directory:
         report_path = Path(directory) / "nikto.json"
@@ -49,6 +52,7 @@ def run(ctx: Any) -> dict[str, Any]:
             "-nocheck",
             "-nolookup",
             "-nocookies",
+            "-useproxy", proxy_url,
             "-Tuning", _SAFE_TUNING,
             "-Pause", f"{pause:.3f}",
             "-timeout", str(request_timeout),
@@ -125,7 +129,7 @@ def run(ctx: Any) -> dict[str, Any]:
         "tuning": _SAFE_TUNING,
         "max_scan_time_seconds": engine_timeout,
         "pause_seconds": pause,
-        "scope_note": "Nikto is pointed at the supplied origin; findings outside its host-and-port scope are discarded.",
+        "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP; HTTPS Host headers inside TLS are not inspected.",
     }
     if process.returncode != 0:
         detail = _brief_stderr(process.stderr)

@@ -389,7 +389,7 @@ def _is_stateful_url(url: str) -> bool:
     return False
 
 
-def crawl(ctx: ScanContext) -> None:
+def crawl(ctx: ScanContext, progress=None) -> None:
     max_pages = int(ctx.options.get("max_pages", 50))
     max_depth = int(ctx.options.get("max_depth", 2))
     start = ctx.base_url
@@ -405,6 +405,8 @@ def crawl(ctx: ScanContext) -> None:
             continue
         seen.add(current)
         response = ctx.request("GET", current)
+        if progress:
+            progress("crawl", len(seen), max_pages, current)
         ctx.record_response(response)
         ctx.discovered_urls.append(response.url)
         if depth == 0:
@@ -480,5 +482,5 @@ def crawl(ctx: ScanContext) -> None:
     ctx.discovered_urls = list(dict.fromkeys(ctx.discovered_urls))
 
 
-def run(ctx: ScanContext) -> None:
-    crawl(ctx)
+def run(ctx: ScanContext, progress=None) -> None:
+    crawl(ctx, progress=progress)

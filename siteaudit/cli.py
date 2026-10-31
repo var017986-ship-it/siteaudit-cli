@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,13 +17,173 @@ from .models import redact_url
 from .plugins import PluginExecutionError, run_plugins
 
 
+class ProgressReporter:
+    """Terminal progress display with a rough ETA derived from completed work."""
+
+    def __init__(self, args: argparse.Namespace):
+        self._is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        self._started = time.monotonic()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._progress = 0.0
+        self._label = "Подготовка сканирования"
+        self._last_line_length = 0
+        self._eta: float | None = None
+        external_count = 5 if "all" in args.engine else len(set(args.engine))
+        self._external_count = external_count
+        self._external_timeout = float(args.engine_timeout)
+        self._external_started_at: float | None = None
+        self._external_completed = 0
+        self._external_total = external_count
+        self._weights = {"crawl": 0.35, "plugins": 0.65}
+        if external_count:
+            self._weights = {"crawl": 0.25, "plugins": 0.5, "external": 0.25}
+        self._starts: dict[str, float] = {}
+        offset = 0.0
+        for stage, weight in self._weights.items():
+            self._starts[stage] = offset
+            offset += weight
+
+    def start(self) -> None:
+        print(
+            "   .---------------------------------------.\n"
+            "  /              SITEAUDIT                  \\\n"
+            " |          .---------------.                |\n"
+            " |       .-'   .-------.     '-.              |\n"
+            " |      /     /  .---.  \\      \\             |\n"
+            " |     |     |  (  o  )  |      |             |\n"
+            " |      \\     \\  '---'  /      /             |\n"
+            " |       '-.   '-------'    .-'              |\n"
+            "  \\          '-------------'               /\n"
+            "   '---------------------------------------'",
+            flush=True,
+        )
+        if self._is_tty:
+            self._thread = threading.Thread(target=self._render_loop, daemon=True)
+            self._thread.start()
+        else:
+            self._print_line()
+
+    def crawl(self, stage: str, current: int, total: int, url: str) -> None:
+        fraction = current / max(total, 1)
+        self.update(stage, fraction, f"Обход {current}/{total} страниц")
+
+    def plugin(self, state: str, current: int, total: int, name: str) -> None:
+        fraction = current / max(total, 1)
+        label = f"Плагин {current}/{total}: {name[:18]}"
+        self.update("plugins", fraction, label)
+
+    def external(self, state: str, current: int, total: int, name: str) -> None:
+        fraction = current / max(total, 1)
+        label = f"Движок {current}/{total}: {name[:22]}"
+        with self._lock:
+            self._external_total = total
+            self._external_completed = current
+            self._external_started_at = time.monotonic() if state == "start" else None
+        self.update("external", fraction, label)
+
+    def update(self, stage: str, fraction: float, label: str) -> None:
+        if stage in self._starts:
+            absolute = self._starts[stage] + self._weights[stage] * min(max(fraction, 0.0), 1.0)
+            with self._lock:
+                self._progress = max(self._progress, min(absolute, 0.999))
+                self._label = label
+                self._update_eta_locked()
+        else:
+            with self._lock:
+                self._label = label
+        if not self._is_tty:
+            self._print_line()
+
+    def finish_stage(self, stage: str, label: str) -> None:
+        self.update(stage, 1.0, label)
+
+    def finish(self, success: bool) -> None:
+        with self._lock:
+            self._progress = 1.0 if success else self._progress
+            self._label = "Сканирование завершено" if success else "Сканирование остановлено с ошибкой"
+            self._eta = 0.0 if success else None
+            if success:
+                self._external_completed = self._external_total
+                self._external_started_at = None
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        self._print_line(newline=True)
+
+    def _update_eta_locked(self) -> None:
+        elapsed = time.monotonic() - self._started
+        if self._progress < 0.03 or elapsed < 1:
+            return
+        estimate = elapsed * (1.0 - self._progress) / self._progress
+        if self._eta is None:
+            self._eta = estimate
+        else:
+            self._eta = 0.65 * self._eta + 0.35 * estimate
+
+    def _render_loop(self) -> None:
+        while not self._stop.wait(0.5):
+            self._print_line()
+
+    def _print_line(self, *, newline: bool = False) -> None:
+        with self._lock:
+            progress = self._progress
+            label = self._label
+            eta = self._eta
+            external_started_at = self._external_started_at
+            external_completed = self._external_completed
+            external_total = self._external_total
+        elapsed = time.monotonic() - self._started
+        current_engine_elapsed = 0.0
+        if self._external_count and external_started_at is not None:
+            current_engine_elapsed = time.monotonic() - external_started_at
+            external_fraction = (
+                external_completed
+                + min(current_engine_elapsed / max(self._external_timeout, 1.0), 0.95)
+            ) / max(external_total, 1)
+            external_progress = self._starts["external"] + self._weights["external"] * external_fraction
+            progress = max(progress, external_progress)
+        width = 12
+        filled = min(width, round(progress * width))
+        bar = "#" * filled + "-" * (width - filled)
+        eta_prefix = "~"
+        if self._external_count and external_started_at is not None:
+            current_engine_left = max(0.0, self._external_timeout - current_engine_elapsed)
+            eta = current_engine_left + max(0, external_total - external_completed - 1) * self._external_timeout
+            eta_prefix = "≤"
+        elif self._external_count and external_completed < self._external_count:
+            if progress >= 0.03 and elapsed >= 1:
+                eta = elapsed * (1.0 - progress) / progress
+            eta = (eta or 0.0) + (self._external_count - external_completed) * self._external_timeout
+            eta_prefix = "≤"
+        elif progress >= 0.03 and elapsed >= 1:
+            eta = elapsed * (1.0 - progress) / progress
+        eta_text = "считаю" if eta is None else _format_duration(max(0, eta))
+        line = f"[{bar}] {progress * 100:3.0f}% | {label[:30]} | t+{_format_duration(elapsed)} | ETA {eta_prefix}{eta_text}"
+        if self._is_tty:
+            padding = " " * max(0, self._last_line_length - len(line))
+            sys.stdout.write("\r" + line + padding + ("\n" if newline else ""))
+            sys.stdout.flush()
+            self._last_line_length = len(line)
+        else:
+            print(line, flush=True)
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="siteaudit", description="Bounded HTTP security checks for authorized web targets.")
-    parser.add_argument("target", help="Target URL or domain (for example, https://example.com)")
+    parser.add_argument("target", nargs="?", help="Target URL or domain (for example, https://example.com)")
     parser.add_argument("--output", "-o", default="siteaudit-report.json", help="JSON report path (default: siteaudit-report.json)")
     parser.add_argument("--max-pages", type=int, default=50, help="Maximum HTML pages to crawl (1-500, default: 50)")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum crawl depth (0-8, default: 2)")
-    parser.add_argument("--delay", type=float, default=0.5, help="Minimum delay between requests in seconds (0.1-10, default: 0.5)")
+    parser.add_argument("--delay", type=float, default=0.5, help="Delay for built-in requests; upstream engines apply it where supported (0.1-10, default: 0.5)")
     parser.add_argument("--timeout", type=float, default=10, help="HTTP timeout in seconds (1-60, default: 10)")
     parser.add_argument("--passive", action="store_true", help="Skip active templates and probes; crawl and inspect fetched responses only")
     parser.add_argument("--post-probes", action="store_true", help="Send one inert marker POST per discovered form; may change target data and requires authorization")
@@ -28,8 +191,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--graphql-probe", action="store_true", help="Send a bounded read-only GraphQL introspection query to up to three same-host endpoints")
     parser.add_argument("--templates-file", help="Load safe JSON or restricted Nuclei YAML templates from a local file")
     parser.add_argument("--engine", action="append", choices=("all", "nuclei", "nikto", "wapiti", "zap", "w3af"), default=[], help="Also run an installed upstream scanner; repeat or use 'all'")
-    parser.add_argument("--engine-timeout", type=int, default=300, help="Maximum runtime per upstream scanner in seconds (30-1800, default: 300)")
-    parser.add_argument("--nuclei-templates", help="Use this local Nuclei template file/directory instead of its installed default pack")
+    parser.add_argument("--engine-timeout", type=int, default=300, help="Scan budget per upstream engine in seconds (30-1800; ZAP baseline/active need 120/180+, default: 300)")
+    parser.add_argument("--nuclei-templates", help="Use and filter this local Nuclei template file/directory (default: ~/nuclei-templates)")
     parser.add_argument("--zap-active", action="store_true", help="Use ZAP full active scan instead of passive baseline; may change target behavior")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     return parser
@@ -66,8 +229,9 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--templates-file requires active scanning and cannot be used with --passive")
 
 
-def run_scan(args: argparse.Namespace) -> dict:
+def run_scan(args: argparse.Namespace, progress: ProgressReporter | None = None) -> dict:
     started = datetime.now(timezone.utc)
+    started_monotonic = time.monotonic()
     options = {
         "max_pages": args.max_pages,
         "max_depth": args.max_depth,
@@ -95,9 +259,21 @@ def run_scan(args: argparse.Namespace) -> dict:
         prepare_templates(ctx)
 
     # The core discovery phase builds the bounded URL/form scope shared by the plugins.
-    run_core(ctx)
-    plugin_results, plugins_enabled = run_plugins(ctx, include_active=not args.passive)
-    external_results = run_external_engines(ctx)
+    if progress:
+        progress.update("prepare", 0, "Обход и сбор страниц")
+    run_core(ctx, progress=progress.crawl if progress else None)
+    if progress:
+        progress.finish_stage("crawl", f"Обход завершён: {len(ctx.discovered_urls)} страниц")
+    plugin_results, plugins_enabled = run_plugins(
+        ctx,
+        include_active=not args.passive,
+        progress=progress.plugin if progress else None,
+    )
+    if progress:
+        progress.finish_stage("plugins", "Проверки SiteAudit завершены")
+    external_results = run_external_engines(ctx, progress=progress.external if progress else None)
+    if progress and "external" in progress._weights:
+        progress.finish_stage("external", "Внешние сканеры завершены")
     if external_results:
         plugin_results["external_engines"] = external_results
         plugins_enabled.extend(f"external_{name}" for name in external_results)
@@ -111,6 +287,7 @@ def run_scan(args: argparse.Namespace) -> dict:
         "target": redact_url(ctx.base_url),
         "started_at": started.isoformat(),
         "completed_at": finished.isoformat(),
+        "duration_seconds": round(time.monotonic() - started_monotonic, 3),
         "settings": {**{key: value for key, value in options.items() if key not in {"templates_file", "nuclei_templates"}}, "custom_templates_enabled": bool(args.templates_file)},
         "summary": {"findings": len(findings), "severity_counts": counts, "pages_visited": len(ctx.discovered_urls), "requests_sent": ctx.request_count, "responses_cached": len(ctx.discovered_responses), "response_cache_limited": ctx.response_cache_limited, "plugin_results": plugin_results},
         "findings": [item.to_dict() for item in findings],
@@ -120,15 +297,26 @@ def run_scan(args: argparse.Namespace) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if not args.target:
+        args.target = os.environ.get("SITEAUDIT_TARGET")
+    if not args.target:
+        parser.error("provide a target URL/domain or set SITEAUDIT_TARGET")
     _validate_args(parser, args)
+    progress = ProgressReporter(args) if sys.stdout.isatty() else None
+    if progress:
+        progress.start()
     try:
-        report = run_scan(args)
+        report = run_scan(args, progress=progress)
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     except (PluginExecutionError, ValueError, OSError) as exc:
+        if progress:
+            progress.finish(False)
         print(f"siteaudit: {exc}", file=sys.stderr)
         return 2
+    if progress:
+        progress.finish(True)
     print(f"Scanned {report['target']}: {report['summary']['findings']} findings, {report['summary']['pages_visited']} pages")
     print(f"JSON report: {output.resolve()}")
     return 0

@@ -7,7 +7,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .external_support import (
     EngineRunError,
@@ -93,6 +93,14 @@ def _finding_url(ctx: Any, value: Any) -> str | None:
     return scoped_url(ctx, candidate)
 
 
+def _folder_scope_url(value: str) -> str:
+    parts = urlsplit(value)
+    path = parts.path or "/"
+    if not path.endswith("/"):
+        path += "/"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
 def _import_report(ctx: Any, report: dict[str, Any]) -> int:
     added = 0
     sections = (
@@ -152,6 +160,10 @@ def run(ctx: Any) -> dict[str, Any]:
     max_pages = min(max(int(options.get("max_pages", 50)), 1), 500)
     modules = _available_safe_modules(executable, engine_timeout)
     version = _version(executable, engine_timeout)
+    proxy_url = options.get("external_proxy_url")
+    if not isinstance(proxy_url, str) or not proxy_url:
+        raise EngineRunError("Wapiti requires the SiteAudit scope proxy")
+    scan_url = _folder_scope_url(ctx.base_url)
 
     with tempfile.TemporaryDirectory(prefix="siteaudit-wapiti-") as temp_directory:
         temp_path = Path(temp_directory)
@@ -162,7 +174,7 @@ def run(ctx: Any) -> dict[str, Any]:
         max_scan_time = max(1.0, engine_timeout - 5.0)
         command = [
             executable,
-            "--url", ctx.base_url,
+            "--url", scan_url,
             "--scope", "folder",
             "--module", ",".join(modules),
             "--depth", str(max_depth),
@@ -174,6 +186,7 @@ def run(ctx: Any) -> dict[str, Any]:
             "--scan-force", "polite",
             "--tasks", "1",
             "--timeout", str(int(request_timeout)),
+            "--proxy", proxy_url,
             "--verify-ssl", "1",
             "--no-bugreport",
             "--flush-session",
@@ -200,8 +213,10 @@ def run(ctx: Any) -> dict[str, Any]:
         "requests_sent": None,
         "findings_imported": imported,
         "modules": modules,
-        "scope": "folder (rooted at the supplied URL)",
-        "scope_note": "Imported findings are checked against host and port; upstream redirects are not intercepted by SiteAudit.",
+        "scope": f"folder (rooted at {scan_url})",
+        "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP; HTTPS Host headers inside TLS are not inspected.",
         "rate_control": "one task with polite scan force; Wapiti has no global requests-per-second flag",
+        "max_pages_enforced": False,
+        "limitations": ["Wapiti bounds depth, links per page, files per directory, and runtime; it does not expose a hard total-page cap."],
         "report_format": "json",
     }
