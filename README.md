@@ -31,6 +31,14 @@ To also send one inert marker in up to five discovered POST forms (may create ta
 siteaudit https://example.com --post-probes --output report.json
 ```
 
+To run a repeated boolean-based SQL injection check against at most two numeric GET parameters (this changes the query value and can affect application behavior):
+
+```powershell
+siteaudit https://example.com --sqli-probes --output report.json
+```
+
+The check compares an unchanged response with two true and two false numeric predicates. It uses no delays, data extraction, callbacks, or write statements.
+
 To optionally check whether a GraphQL endpoint exposes its query type through introspection (up to three same-host POSTs; no cookies/authentication; informational result):
 
 ```powershell
@@ -53,7 +61,7 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 - Same-host page discovery with configurable depth and page/request limits.
 - Bounded in-memory response cache (up to 100 responses and 2 MB) for passive checks of mixed content, weak CSP, stack-trace leakage, and CORS headers.
 - A small curated set of common web-server exposure checks. Sensitive paths use bodyless HEAD requests and are compared with a random missing-path response to filter common soft-404 or single-page-app catch-all responses.
-- Low-impact GET-only checks on discovered query parameters for parsed inert HTML-marker reflection, common database error indicators, and open redirects on redirect-like parameters; redirect probes are never followed, and reflection does not confirm XSS.
+- Low-impact GET-only checks on discovered query parameters for parsed inert HTML-marker reflection, common database error indicators, and open redirects on redirect-like parameters; redirect probes are never followed, and reflection does not confirm XSS. Optional `--sqli-probes` compares stable responses from repeated true/false predicates on at most two numeric GET parameters to look for blind SQL injection.
 - A bounded server-side template injection check sends only nonce-wrapped multiplication expressions to at most two non-sensitive GET parameters; it reports evaluation only when both computed outputs match.
 - A small modular W3AF-inspired plugin set for credentialed arbitrary-origin CORS reflection and POST forms with no recognizable CSRF token field; this CSRF heuristic never submits forms.
 - Optional GraphQL introspection check using one fixed read-only query on up to three same-host endpoints; the schema is not saved and the result is informational.

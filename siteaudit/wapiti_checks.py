@@ -16,7 +16,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 _MAX_PAGES = 5
 _MAX_PARAMS_PER_PAGE = 2
-_MAX_REQUESTS = 24
+_MAX_REQUESTS = 40
+_MAX_BOOLEAN_SQLI_TARGETS = 2
 _MAX_RESPONSE_BYTES = 96_000
 _SENSITIVE_PARAMETER_PARTS = (
     "token", "password", "passwd", "pwd", "secret", "session", "auth",
@@ -48,6 +49,7 @@ _SQL_ERROR_MARKERS = (
     "ora-01756",
     "sqlstate[",
 )
+_SQLI_REFERENCE = "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Injection/05-SQL_Injection/"
 
 
 class _GetFormParser(HTMLParser):
@@ -200,6 +202,86 @@ def _request(ctx: object, url: str) -> object | None:
     except Exception:
         # Network and policy errors are local to this probe; other checks can continue.
         return None
+
+
+def _response_signature(response: object) -> tuple[int | None, str, bytes] | None:
+    if response is None or getattr(response, "error", None) or getattr(response, "truncated", False):
+        return None
+    status = _status_code(response)
+    if status is None or not 200 <= status < 300:
+        return None
+    headers = getattr(response, "headers", {}) or {}
+    content_type = next(
+        (str(value).split(";", 1)[0].strip().lower() for key, value in headers.items()
+         if str(key).lower() == "content-type"),
+        "",
+    )
+    body = getattr(response, "body", None)
+    if not isinstance(body, bytes):
+        body = _response_text(response).encode("utf-8", errors="replace")
+    return status, content_type, body
+
+
+def _boolean_sqli_check(ctx: object, page_url: str, baseline: object, key: str, value: str) -> int:
+    """Confirm only a stable true/false response split for one numeric GET value."""
+    baseline_signature = _response_signature(baseline)
+    if baseline_signature is None or not baseline_signature[2]:
+        return 0
+
+    # A repeated unmodified request detects non-deterministic pages before any
+    # comparison is treated as an injection indicator.
+    control = _request(ctx, page_url)
+    control_signature = _response_signature(control)
+    requests_sent = 1
+    if control_signature != baseline_signature:
+        return requests_sent
+
+    probes = (
+        (f"{value} AND 1=1", True),
+        (f"{value} AND 1=2", False),
+        (f"{value} AND 2=2", True),
+        (f"{value} AND 2=3", False),
+    )
+    true_signatures: list[tuple[int | None, str, bytes]] = []
+    false_signatures: list[tuple[int | None, str, bytes]] = []
+    for probe_value, is_true in probes:
+        probe_url = _replace_query_value(page_url, key, probe_value)
+        if not _same_host(probe_url, ctx) or _is_stateful_url(probe_url):
+            continue
+        response = _request(ctx, probe_url)
+        requests_sent += 1
+        signature = _response_signature(response)
+        if signature is None or signature[:2] != baseline_signature[:2]:
+            return requests_sent
+        (true_signatures if is_true else false_signatures).append(signature)
+
+    if (len(true_signatures) != 2 or len(false_signatures) != 2
+            or true_signatures[0] != baseline_signature
+            or true_signatures[1] != baseline_signature
+            or false_signatures[0] != false_signatures[1]
+            or false_signatures[0] == baseline_signature):
+        return requests_sent
+
+    _record(
+        ctx,
+        finding_id="sqli.boolean.numeric-differential",
+        title=f"Numeric GET parameter {key!r} produces a stable true/false SQL response difference",
+        severity="medium",
+        confidence="medium",
+        url=page_url,
+        evidence=(
+            f"For numeric GET parameter {key!r}, the repeated baseline and two tautology probes returned identical HTTP status, "
+            "content type, and response body. Two contradiction probes returned the same alternate response. This stable split "
+            "is consistent with a boolean SQL injection oracle; no timing, data extraction, or write operation was attempted."
+        ),
+        recommendation=(
+            "Use parameterized queries and validate numeric input on the server. Review the query handling for this parameter; "
+            "the differential result is strong evidence but should be confirmed against application code or a controlled test environment."
+        ),
+        category="sql-injection",
+        references=[_SQLI_REFERENCE],
+    )
+    return requests_sent
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -365,6 +447,7 @@ def run(ctx: object) -> int:
     """
     requests_used = 0
     requests_before = getattr(ctx, "request_count", 0)
+    boolean_targets = 0
 
     for page_url in _candidate_urls(ctx):
         if requests_used >= _MAX_REQUESTS:
@@ -555,5 +638,28 @@ def run(ctx: object) -> int:
                     ),
                     category="error-disclosure",
                 )
+
+        if (boolean_targets < _MAX_BOOLEAN_SQLI_TARGETS
+                and (getattr(ctx, "options", {}) or {}).get("allow_sqli_probes")):
+            parsed_query = parse_qsl(urlsplit(page_url).query, keep_blank_values=True)
+            key_counts: dict[str, int] = {}
+            for query_key, _ in parsed_query:
+                key_counts[query_key] = key_counts.get(query_key, 0) + 1
+            if not any(_is_sensitive_key(query_key) for query_key, _ in parsed_query):
+                candidate = next((
+                    (query_key, query_value)
+                    for query_key, query_value in parsed_query
+                    if key_counts[query_key] == 1
+                    and not _is_sensitive_key(query_key)
+                    and len(query_value) <= 10
+                    and query_value.isascii()
+                    and query_value.isdigit()
+                ), None)
+                # Five extra requests: a repeated baseline plus two independent
+                # true/false predicates. Numeric targets are limited to two per scan.
+                if candidate and requests_used + 5 <= _MAX_REQUESTS:
+                    key, value = candidate
+                    requests_used += _boolean_sqli_check(ctx, page_url, baseline, key, value)
+                    boolean_targets += 1
     _run_post_form_markers(ctx)
     return max(0, getattr(ctx, "request_count", 0) - requests_before)
