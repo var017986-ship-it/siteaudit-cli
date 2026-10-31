@@ -102,6 +102,23 @@ class _GetFormParser(HTMLParser):
         self._method = "get"
 
 
+class _InertElementParser(HTMLParser):
+    """Recognize the scanner's exact inert custom element in parsed HTML."""
+
+    def __init__(self, expected_tag: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.expected_tag = expected_tag.lower()
+        self.found = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == self.expected_tag:
+            self.found = True
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == self.expected_tag:
+            self.found = True
+
+
 def _same_host(url: str, target: object) -> bool:
     # Reuse the context's canonical host+port and HTTPS downgrade checks.
     # `ctx.host` includes an effective port, so comparing it to urlsplit().hostname
@@ -165,6 +182,16 @@ def _status_code(response: object) -> int | None:
         return int(getattr(response, "status_code"))
     except (TypeError, ValueError, AttributeError):
         return None
+
+
+def _is_html_response(response: object) -> bool:
+    headers = getattr(response, "headers", {}) or {}
+    content_type = next(
+        (str(value) for key, value in headers.items() if str(key).lower() == "content-type"),
+        "",
+    )
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type in {"text/html", "application/xhtml+xml"}
 
 
 def _request(ctx: object, url: str) -> object | None:
@@ -423,21 +450,28 @@ def run(ctx: object) -> int:
                 continue
             marker_response = _request(ctx, marker_url)
             requests_used += 1
-            if marker_response is None or getattr(marker_response, "error", None):
+            if (marker_response is None or getattr(marker_response, "error", None)
+                    or not _is_html_response(marker_response)):
                 continue
             marker_body = _response_text(marker_response)
-            if marker in marker_body and inert_markup in marker_body:
+            markup_parser = _InertElementParser(f"x-{marker}")
+            try:
+                markup_parser.feed(marker_body)
+                markup_parser.close()
+            except Exception:
+                continue
+            if markup_parser.found:
                 _record(
                     ctx,
                     finding_id="potential-reflected-html",
-                    title="Unescaped input reflected in HTML response",
+                    title="Unescaped input appears as a parsed HTML element",
                     severity="low",
                     confidence="low",
                     url=marker_url,
                     evidence=(
-                        f"GET parameter {key!r} returned the inert probe marker as raw HTML "
-                        f"(HTTP {_status_code(marker_response) or 'unknown'}). This indicates reflection; "
-                        "the output context was not verified and this does not confirm XSS."
+                        f"GET parameter {key!r} returned the unique inert element x-{marker}, which the HTML parser "
+                        f"recognized in the response (HTTP {_status_code(marker_response) or 'unknown'}). "
+                        "This does not confirm script execution or XSS."
                     ),
                     recommendation=(
                         "Encode untrusted values for their output context and validate them on the server. "
