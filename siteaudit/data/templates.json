@@ -135,6 +135,115 @@
         "https://spec.openapis.org/oas/latest.html",
         "https://springdoc.org/"
       ]
+    },
+    {
+      "id": "git.config-public",
+      "name": "Git repository configuration is publicly reachable",
+      "severity": "low",
+      "confidence": "high",
+      "category": "source-control-exposure",
+      "method": "GET",
+      "path": "/.git/config",
+      "max_bytes": 8192,
+      "match": {
+        "status": [200],
+        "body_contains": [
+          "[core]",
+          "repositoryformatversion ="
+        ],
+        "body_not_contains": [
+          "<!doctype html",
+          "<html"
+        ],
+        "condition": "all"
+      },
+      "evidence": "An unauthenticated GET to /.git/config returned Git repository configuration markers. The response body and any remote values are not copied into the report; review whether source-control metadata is publicly accessible.",
+      "remediation": "Deny web access to the .git directory and remove repository metadata from the deployed document root. Review exposed configuration for internal paths or credentials.",
+      "references": [
+        "https://git-scm.com/docs/gitrepository-layout"
+      ]
+    },
+    {
+      "id": "php.phpinfo-public",
+      "name": "PHP configuration diagnostic page is publicly reachable",
+      "severity": "medium",
+      "confidence": "high",
+      "category": "diagnostic-information-exposure",
+      "method": "GET",
+      "path": "/phpinfo.php",
+      "max_bytes": 16384,
+      "match": {
+        "status": [200],
+        "headers": [
+          {
+            "name": "content-type",
+            "contains": "html"
+          }
+        ],
+        "body_contains": [
+          "phpinfo()",
+          "PHP Version"
+        ],
+        "condition": "all"
+      },
+      "evidence": "The response matches PHP's configuration-information page. phpinfo output can disclose runtime settings, environment data, paths, and loaded extensions; response contents are not copied into the report.",
+      "remediation": "Remove public phpinfo pages or restrict them to an authenticated administrative network. Review and rotate any secrets that may have been displayed.",
+      "references": [
+        "https://www.php.net/manual/en/function.phpinfo.php"
+      ]
+    },
+    {
+      "id": "apache.server-status-public",
+      "name": "Apache server status page is publicly reachable",
+      "severity": "low",
+      "confidence": "high",
+      "category": "server-status-exposure",
+      "method": "GET",
+      "path": "/server-status",
+      "max_bytes": 16384,
+      "match": {
+        "status": [200],
+        "body_contains": [
+          "Apache Server Status",
+          "Server uptime:",
+          "requests currently being processed"
+        ],
+        "condition": "all"
+      },
+      "evidence": "The response matches Apache mod_status output. Depending on configuration, this page can disclose worker activity, current requests, client hosts, and server performance data; response contents are not copied into the report.",
+      "remediation": "Restrict mod_status to an authenticated administrative or monitoring network. Disable the handler when it is not required.",
+      "references": [
+        "https://httpd.apache.org/docs/2.4/mod/mod_status.html"
+      ]
+    },
+    {
+      "id": "go.expvar.public",
+      "name": "Go expvar runtime metrics are publicly reachable",
+      "severity": "low",
+      "confidence": "high",
+      "category": "runtime-metrics-exposure",
+      "method": "GET",
+      "path": "/debug/vars",
+      "max_bytes": 16384,
+      "match": {
+        "status": [200],
+        "headers": [
+          {
+            "name": "content-type",
+            "contains": "json"
+          }
+        ],
+        "body_contains": [
+          "\"cmdline\"",
+          "\"memstats\""
+        ],
+        "condition": "all"
+      },
+      "evidence": "The response matches Go expvar's standard runtime variables and exposes process arguments and memory statistics. The response body is not included in the report.",
+      "remediation": "Restrict diagnostic metrics to an authenticated monitoring network or remove the public expvar handler.",
+      "references": [
+        "https://pkg.go.dev/expvar"
+      ]
     }
   ]
 }
