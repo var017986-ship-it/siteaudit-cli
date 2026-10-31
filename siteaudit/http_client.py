@@ -16,6 +16,8 @@ from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, Proxy
 
 from .models import Finding
 
+_GRAPHQL_INTROSPECTION_BODY = b'{"query":"{ __schema { queryType { name } } }"}'
+
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -247,24 +249,52 @@ class ScanContext:
         if verb not in {"GET", "HEAD", "OPTIONS", "POST"}:
             return ScanResponse(url=url, error=f"HTTP method {verb} is blocked")
         if verb == "POST":
-            if not self.options.get("allow_post_probes"):
-                return ScanResponse(url=url, error="POST probes require the explicit --post-probes option")
             if follow_redirects:
                 return ScanResponse(url=url, error="POST probes must not follow redirects")
-            if isinstance(data, str):
-                data = data.encode("utf-8")
-            if not isinstance(data, bytes) or len(data) > 4096:
-                return ScanResponse(url=url, error="POST probes require a form body no larger than 4096 bytes")
-            try:
-                fields = parse_qsl(data.decode("ascii"), keep_blank_values=True, strict_parsing=True)
-            except (UnicodeDecodeError, ValueError):
-                return ScanResponse(url=url, error="POST probes accept one URL-encoded marker field only")
-            if (len(fields) != 1 or not fields[0][0]
-                    or any(ord(char) < 32 for char in fields[0][0])
-                    or re.fullmatch(r"siteauditpost[0-9a-f]{12}", fields[0][1]) is None):
-                return ScanResponse(url=url, error="POST probes accept one URL-encoded marker field only")
+            graphql_probe = isinstance(data, bytes) and data == _GRAPHQL_INTROSPECTION_BODY
+            if graphql_probe:
+                if not self.options.get("allow_graphql_probe"):
+                    return ScanResponse(url=url, error="GraphQL probe requires the explicit --graphql-probe option")
+                if params:
+                    return ScanResponse(url=url, error="GraphQL probe does not accept additional parameters")
+                try:
+                    parsed_url = urlsplit(url)
+                except ValueError:
+                    return ScanResponse(url=url, error="GraphQL probe URL is invalid")
+                path = parsed_url.path.rstrip("/").lower()
+                if (parsed_url.query or parsed_url.fragment or self._looks_stateful(url)
+                        or not path.endswith("/graphql")):
+                    return ScanResponse(url=url, error="GraphQL probe is limited to a fixed GraphQL endpoint path")
+                if any(
+                    key.lower() in {"authorization", "proxy-authorization", "cookie"}
+                    for key in (headers or {})
+                ):
+                    return ScanResponse(url=url, error="GraphQL probe does not send cookies or authorization headers")
+                content_type = next(
+                    (value for key, value in (headers or {}).items() if key.lower() == "content-type"),
+                    "",
+                )
+                if content_type.lower().split(";", 1)[0].strip() != "application/json":
+                    return ScanResponse(url=url, error="GraphQL probe requires application/json")
+            else:
+                if not self.options.get("allow_post_probes"):
+                    return ScanResponse(url=url, error="POST probes require the explicit --post-probes option")
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                if not isinstance(data, bytes) or len(data) > 4096:
+                    return ScanResponse(url=url, error="POST probes require a form body no larger than 4096 bytes")
+                try:
+                    fields = parse_qsl(data.decode("ascii"), keep_blank_values=True, strict_parsing=True)
+                except (UnicodeDecodeError, ValueError):
+                    return ScanResponse(url=url, error="POST probes accept one URL-encoded marker field only")
+                if (len(fields) != 1 or not fields[0][0]
+                        or any(ord(char) < 32 for char in fields[0][0])
+                        or re.fullmatch(r"siteauditpost[0-9a-f]{12}", fields[0][1]) is None):
+                    return ScanResponse(url=url, error="POST probes accept one URL-encoded marker field only")
         elif data is not None:
             return ScanResponse(url=url, error="Request bodies are blocked for this method")
+        else:
+            graphql_probe = False
 
         target = url
         if params:
@@ -291,14 +321,15 @@ class ScanContext:
                         time.sleep(wait_for)
                     self._last_request_at = time.monotonic()
 
-                request_headers = {"User-Agent": "SiteAudit/0.5.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
+                request_headers = {"User-Agent": "SiteAudit/0.6.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
                 if headers:
                     request_headers.update(headers)
                 if verb == "POST":
                     content_type = next((value for key, value in request_headers.items() if key.lower() == "content-type"), "application/x-www-form-urlencoded")
-                    if content_type.lower().split(";", 1)[0].strip() != "application/x-www-form-urlencoded":
-                        return ScanResponse(url=target, error="POST probes allow only form-urlencoded bodies")
-                    request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    expected_content_type = "application/json" if graphql_probe else "application/x-www-form-urlencoded"
+                    if content_type.lower().split(";", 1)[0].strip() != expected_content_type:
+                        return ScanResponse(url=target, error=f"POST probes allow only {expected_content_type} bodies")
+                    request_headers["Content-Type"] = expected_content_type
                 req = Request(target, data=data if verb == "POST" else None, headers=request_headers, method=verb)
                 timeout = float(self.options.get("timeout", 10))
                 try:

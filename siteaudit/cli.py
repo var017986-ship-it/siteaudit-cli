@@ -23,6 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=10, help="HTTP timeout in seconds (1-60, default: 10)")
     parser.add_argument("--passive", action="store_true", help="Skip active templates and probes; crawl and inspect fetched responses only")
     parser.add_argument("--post-probes", action="store_true", help="Send one inert marker POST per discovered form; may change target data and requires authorization")
+    parser.add_argument("--graphql-probe", action="store_true", help="Send a bounded read-only GraphQL introspection query to up to three same-host endpoints")
     parser.add_argument("--templates-file", help="Load additional safe JSON templates from a local file")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     return parser
@@ -39,6 +40,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--timeout must be between 1 and 60 seconds")
     if args.passive and args.post_probes:
         parser.error("--post-probes cannot be used with --passive")
+    if args.passive and args.graphql_probe:
+        parser.error("--graphql-probe cannot be used with --passive")
     if args.passive and args.templates_file:
         parser.error("--templates-file requires active scanning and cannot be used with --passive")
 
@@ -53,6 +56,7 @@ def run_scan(args: argparse.Namespace) -> dict:
         "allow_private": args.allow_private,
         "passive": args.passive,
         "allow_post_probes": args.post_probes,
+        "allow_graphql_probe": args.graphql_probe,
         "templates_file": args.templates_file,
         "max_response_bytes": 131072,
         "max_requests": max(80, args.max_pages * 8),

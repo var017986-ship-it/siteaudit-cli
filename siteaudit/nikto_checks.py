@@ -7,6 +7,7 @@ Sensitive file contents are never requested or included in findings.
 
 from __future__ import annotations
 
+from secrets import token_hex
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -84,7 +85,23 @@ def _metadata_findings(ctx) -> None:
         )
 
 
-def _check_sensitive_paths(ctx, origin: str) -> None:
+def _same_head_signature(response, baseline) -> bool:
+    """Treat identical HEAD metadata as a likely soft-404 or SPA catch-all."""
+    if response is None or baseline is None:
+        return True
+    if getattr(response, "error", None) or getattr(baseline, "error", None):
+        return True
+    if getattr(response, "status_code", None) != getattr(baseline, "status_code", None):
+        return False
+
+    compared_headers = ("content-type", "content-length", "content-disposition", "etag", "last-modified")
+    return all(
+        _header(getattr(response, "headers", {}), name) == _header(getattr(baseline, "headers", {}), name)
+        for name in compared_headers
+    )
+
+
+def _check_sensitive_paths(ctx, origin: str, baseline) -> None:
     for path, title, severity in _SENSITIVE_PATHS:
         url = origin + path
         response = _head(ctx, url)
@@ -92,7 +109,7 @@ def _check_sensitive_paths(ctx, origin: str) -> None:
             continue
 
         status = getattr(response, "status_code", 0)
-        if status not in _REPORTABLE:
+        if status not in _REPORTABLE or _same_head_signature(response, baseline):
             continue
 
         content_type = _header(getattr(response, "headers", {}), "content-type")
@@ -102,7 +119,8 @@ def _check_sensitive_paths(ctx, origin: str) -> None:
             evidence_parts.append(f"Content-Type: {content_type[:100]}")
         if content_length.isdigit():
             evidence_parts.append(f"Content-Length: {content_length} bytes")
-        evidence_parts.append("Response body was not requested; verify manually")
+        evidence_parts.append("HEAD metadata differs from a random missing-path response; body was not requested")
+        evidence_parts.append("verify manually")
 
         ctx.add_finding(
             id="nikto.exposed_path." + path.strip("/").replace("/", ".").replace(".", "_"),
@@ -113,7 +131,7 @@ def _check_sensitive_paths(ctx, origin: str) -> None:
             evidence="; ".join(evidence_parts),
             recommendation=(
                 "Confirm that this resource is intentionally public. Remove it from the web root or deny access; "
-                "rotate any credentials if sensitive data was exposed. A 200 response alone can be a catch-all route."
+                "rotate any credentials if sensitive data was exposed. HEAD metadata is only an indicator; verify manually."
             ),
             category="server_exposure",
         )
@@ -148,10 +166,22 @@ def _check_allowed_methods(ctx) -> None:
     )
 
 
-def run(ctx) -> int:
+def run(ctx) -> dict[str, int | bool]:
     """Run bounded metadata-only web-server checks and append findings."""
     requests_before = ctx.request_count
     origin = _origin(ctx.base_url)
-    _check_sensitive_paths(ctx, origin)
+    baseline_url = origin + "/siteaudit-missing-" + token_hex(6)
+    baseline = _head(ctx, baseline_url)
+    baseline_available = (
+        baseline is not None
+        and not getattr(baseline, "error", None)
+        and getattr(baseline, "status_code", None) is not None
+    )
+    if baseline_available:
+        _check_sensitive_paths(ctx, origin, baseline)
     _check_allowed_methods(ctx)
-    return ctx.request_count - requests_before
+    return {
+        "requests_sent": max(0, ctx.request_count - requests_before),
+        "missing_path_baseline_available": baseline_available,
+        "sensitive_paths_checked": len(_SENSITIVE_PATHS) if baseline_available else 0,
+    }
