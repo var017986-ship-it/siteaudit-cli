@@ -1,7 +1,9 @@
 param(
     [switch]$SkipNuclei,
     [switch]$SkipWapiti,
-    [switch]$SkipDocker
+    [switch]$SkipDocker,
+    [switch]$SkipWslNikto,
+    [switch]$SkipWslZap
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +30,7 @@ Write-Host "Managed tool directory: $engineHome"
 Write-Host "This installs tools for the current Windows user; it does not scan a website."
 
 if (-not $SkipNuclei) {
-    Write-Host "`n[1/3] Installing Nuclei v3.11.1 and its official template pack..."
+    Write-Host "`n[1/5] Installing Nuclei v3.11.1 and its official template pack..."
     try {
     $tag = "v3.11.1"
     $release = Invoke-RestMethod -Headers @{ "User-Agent" = "SiteAudit-engine-setup" } `
@@ -81,7 +83,7 @@ if (-not $SkipNuclei) {
 }
 
 if (-not $SkipWapiti) {
-    Write-Host "`n[2/3] Installing Wapiti into an isolated Python 3.12+ environment..."
+    Write-Host "`n[2/5] Installing Wapiti into an isolated Python 3.12+ environment..."
     try {
     $pyLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
     $pythonExecutable = $null
@@ -129,7 +131,7 @@ if (-not $SkipWapiti) {
 }
 
 if (-not $SkipDocker) {
-    Write-Host "`n[3/3] Checking Docker and pulling the official Nikto and ZAP images..."
+    Write-Host "`n[3/5] Checking Docker and pulling the official Nikto and ZAP images..."
     try {
     $docker = Get-Command "docker.exe" -ErrorAction SilentlyContinue
     if (-not $docker) { $docker = Get-Command "docker" -ErrorAction SilentlyContinue }
@@ -166,6 +168,91 @@ if (-not $SkipDocker) {
     }
 } else {
     $manifest.skipped.docker = "requested by command line"
+}
+
+if (-not $SkipWslNikto) {
+    Write-Host "`n[4/5] Installing pinned Nikto 2.6.1 in WSL Debian..."
+    try {
+        $wsl = Get-Command "wsl.exe" -ErrorAction SilentlyContinue
+        if (-not $wsl) {
+            $manifest.skipped.wsl_nikto = "wsl.exe was not found. Install WSL2 with Debian, then run scripts/setup-wsl-nikto.ps1."
+            Write-Warning $manifest.skipped.wsl_nikto
+        } else {
+            $distroOutput = & $wsl.Source --list --quiet 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                $manifest.skipped.wsl_nikto = "Could not list WSL distributions. Start WSL, then run scripts/setup-wsl-nikto.ps1."
+                Write-Warning $manifest.skipped.wsl_nikto
+            } else {
+                $distroText = (($distroOutput -join "`n") -replace "`0", "" -replace "`r", "")
+                if ($distroText -notmatch "(?m)^\s*Debian\s*$") {
+                    $manifest.skipped.wsl_nikto = "WSL Debian was not found. Install it with 'wsl --install -d Debian', then rerun setup."
+                    Write-Warning $manifest.skipped.wsl_nikto
+                } else {
+                    $wslNiktoSetup = Join-Path $PSScriptRoot "setup-wsl-nikto.ps1"
+                    if (-not (Test-Path -LiteralPath $wslNiktoSetup -PathType Leaf)) {
+                        throw "WSL Nikto setup script was not found at $wslNiktoSetup."
+                    }
+                    & $wslNiktoSetup
+                    if ($LASTEXITCODE -ne 0) { throw "WSL Nikto setup returned exit code $LASTEXITCODE." }
+                    $manifest.installed["nikto-wsl"] = @{
+                        version = "2.6.1"
+                        distribution = "Debian"
+                        upstream_commit = "d201dac"
+                        installation_path = "/opt/siteaudit/nikto-2.6.1"
+                        source = "https://github.com/sullo/nikto/releases/tag/2.6.1"
+                    }
+                }
+            }
+        }
+    } catch {
+        $manifest.failed.wsl_nikto = $_.Exception.Message
+        Write-Warning "WSL Nikto setup failed: $($_.Exception.Message)"
+    }
+} else {
+    $manifest.skipped.wsl_nikto = "requested by command line"
+}
+
+if (-not $SkipWslZap) {
+    Write-Host "`n[5/5] Installing pinned OWASP ZAP 2.17.0 in WSL Debian..."
+    try {
+        $wsl = Get-Command "wsl.exe" -ErrorAction SilentlyContinue
+        if (-not $wsl) {
+            $manifest.skipped.wsl_zap = "wsl.exe was not found. Install WSL2 with Debian, then run scripts/setup-wsl-zap.ps1."
+            Write-Warning $manifest.skipped.wsl_zap
+        } else {
+            $distroOutput = & $wsl.Source --list --verbose 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                $manifest.skipped.wsl_zap = "Could not list WSL distributions. Start WSL, then run scripts/setup-wsl-zap.ps1."
+                Write-Warning $manifest.skipped.wsl_zap
+            } else {
+                $distroText = (($distroOutput -join "`n") -replace "`0", "" -replace "`r", "")
+                if ($distroText -notmatch "(?m)^\s*\*?\s*Debian\s+\S+\s+2\s*$") {
+                    $manifest.skipped.wsl_zap = "WSL2 Debian was not found. Install it with 'wsl --install -d Debian', then rerun setup."
+                    Write-Warning $manifest.skipped.wsl_zap
+                } else {
+                    $wslZapSetup = Join-Path $PSScriptRoot "setup-wsl-zap.ps1"
+                    if (-not (Test-Path -LiteralPath $wslZapSetup -PathType Leaf)) {
+                        throw "WSL ZAP setup script was not found at $wslZapSetup."
+                    }
+                    & $wslZapSetup
+                    if ($LASTEXITCODE -ne 0) { throw "WSL ZAP setup returned exit code $LASTEXITCODE." }
+                    $manifest.installed["zap-wsl"] = @{
+                        version = "2.17.0"
+                        distribution = "Debian"
+                        installation_path = "/opt/siteaudit/zap-2.17.0"
+                        sha256 = "efe799aaa3627db683b43f00c9c210aea0b75c00cc8f0a0f0434d12bb3ddde5a"
+                        java_requirement = "Java 17 or newer"
+                        source = "https://github.com/zaproxy/zaproxy/releases/download/v2.17.0/ZAP_2.17.0_Linux.tar.gz"
+                    }
+                }
+            }
+        }
+    } catch {
+        $manifest.failed.wsl_zap = $_.Exception.Message
+        Write-Warning "WSL ZAP setup failed: $($_.Exception.Message)"
+    }
+} else {
+    $manifest.skipped.wsl_zap = "requested by command line"
 }
 
 $manifest.skipped.w3af = "W3AF is a legacy Linux/macOS scanner and is not installed or run by this Windows setup script."

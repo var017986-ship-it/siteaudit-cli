@@ -258,7 +258,9 @@ def run(ctx: Any) -> dict[str, Any]:
             raise EngineRunError(f"Could not create W3AF temporary script: {exc}") from exc
 
         result = run_command(
-            [executable, "-s", str(script_path)],
+            # Prevent the legacy console from checking/downloading updates
+            # outside the selected target scope when it starts.
+            [executable, "-n", "-s", str(script_path)],
             timeout=engine_timeout,
             cwd=temp_path,
             monitored_paths=[report_path],

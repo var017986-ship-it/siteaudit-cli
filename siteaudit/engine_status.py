@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .external_support import EngineRunError, EngineUnavailable, find_executable, get_engine_home, run_command
+from .external_nikto import wsl_nikto_runtime
+from .external_zap import wsl_zap_runtime
 
 
 _ZAP_IMAGE = "ghcr.io/zaproxy/zaproxy:stable"
@@ -129,29 +131,54 @@ def _nikto_status() -> dict[str, Any]:
     try:
         executable = find_executable("nikto", "nikto.pl")
     except EngineUnavailable:
-        return _nikto_docker_status()
-    uses_perl = Path(executable).suffix.lower() == ".pl"
-    perl = shutil.which("perl") if uses_perl else None
-    if uses_perl and not perl:
-        docker_status = _nikto_docker_status()
-        if docker_status.get("status") == "ready":
-            return docker_status
+        executable = None
+    if executable:
+        uses_perl = Path(executable).suffix.lower() == ".pl"
+        perl = shutil.which("perl") if uses_perl else None
+        if not uses_perl or perl:
+            return _status(
+                "ready",
+                "Nikto launcher is available." + (" Perl is also available." if uses_perl else ""),
+                "No setup action needed.",
+                executable=executable,
+                perl_required=uses_perl,
+                perl_executable=perl,
+            )
+
+    wsl_runtime = wsl_nikto_runtime()
+    if wsl_runtime.get("ready"):
+        return _status(
+            "ready",
+            "Pinned Nikto 2.6.1 is available in WSL Debian.",
+            "No setup action needed.",
+            execution="wsl",
+            distribution=wsl_runtime.get("distribution"),
+            upstream_commit=wsl_runtime.get("commit"),
+            proxy_host_gateway=wsl_runtime.get("host_gateway"),
+        )
+
+    docker_status = _nikto_docker_status()
+    if docker_status.get("status") == "ready":
+        docker_status["wsl_status"] = wsl_runtime.get("reason")
+        docker_status["wsl_next_step"] = "Run scripts/setup-wsl-nikto.ps1 to install pinned Nikto in Debian."
+        return docker_status
+    if wsl_runtime.get("wsl_executable"):
         return _status(
             "missing",
-            "Nikto's Perl script was found, but Perl and a ready Nikto Docker image are missing.",
-            "Install Perl and add perl.exe to PATH, or start Docker Desktop and pull the official Nikto image.",
-            executable=executable,
-            perl_required=True,
-            docker_image=_NIKTO_IMAGE,
+            str(wsl_runtime.get("reason", "Pinned Nikto is not available in WSL Debian.")),
+            "Run scripts/setup-wsl-nikto.ps1 from the project directory, then rerun --doctor.",
+            execution="wsl",
+            distribution="Debian",
+            upstream_commit="d201dac",
+            diagnostic=wsl_runtime.get("diagnostic") or wsl_runtime.get("route_diagnostic"),
             docker_status=docker_status.get("summary"),
         )
     return _status(
-        "ready",
-        "Nikto launcher is available." + (" Perl is also available." if uses_perl else ""),
-        "No setup action needed.",
-        executable=executable,
-        perl_required=uses_perl,
-        perl_executable=perl,
+        "missing",
+        str(wsl_runtime.get("reason", "Nikto was not found.")),
+        "Install WSL2 with Debian and run scripts/setup-wsl-nikto.ps1, or install native Nikto / the official Docker image.",
+        docker_image=_NIKTO_IMAGE,
+        docker_status=docker_status.get("summary"),
     )
 
 
@@ -239,13 +266,26 @@ def _wapiti_status() -> dict[str, Any]:
 
 
 def _zap_status() -> dict[str, Any]:
+    wsl_runtime = wsl_zap_runtime()
+    if wsl_runtime.get("ready"):
+        return _status(
+            "ready",
+            f"Pinned OWASP ZAP {wsl_runtime.get('version')} is ready in WSL Debian.",
+            "No setup action needed. Baseline mode is passive; active scanning requires the explicit zap_active option.",
+            execution="wsl",
+            distribution=wsl_runtime.get("distribution"),
+            version=wsl_runtime.get("version"),
+            sha256=wsl_runtime.get("sha256"),
+            proxy_host_gateway=wsl_runtime.get("host_gateway"),
+        )
     docker = shutil.which("docker") or shutil.which("docker.exe")
     if not docker:
         return _status(
             "missing",
-            "Docker CLI was not found on PATH.",
-            "Install Docker Desktop, start its daemon, and reopen the terminal.",
+            str(wsl_runtime.get("reason") if os.name == "nt" else "Docker CLI was not found on PATH."),
+            "Run scripts/setup-wsl-zap.ps1 to install pinned ZAP in WSL Debian, or install Docker Desktop and the official ZAP image.",
             image=_ZAP_IMAGE,
+            wsl_diagnostic=wsl_runtime.get("diagnostic"),
         )
 
     daemon = _probe([docker, "info", "--format", "{{.ServerVersion}}"])
@@ -257,6 +297,7 @@ def _zap_status() -> dict[str, Any]:
             executable=docker,
             image=_ZAP_IMAGE,
             diagnostic=daemon.get("detail"),
+            wsl_diagnostic=wsl_runtime.get("reason"),
         )
 
     image = _probe([docker, "image", "inspect", _ZAP_IMAGE, "--format", "{{.Id}}"])
@@ -269,6 +310,7 @@ def _zap_status() -> dict[str, Any]:
             docker_server_version=daemon.get("value"),
             image=_ZAP_IMAGE,
             diagnostic=image.get("detail"),
+            wsl_diagnostic=wsl_runtime.get("reason"),
         )
     return _status(
         "ready",
@@ -278,6 +320,8 @@ def _zap_status() -> dict[str, Any]:
         docker_server_version=daemon.get("value"),
         image=_ZAP_IMAGE,
         image_id=image.get("value"),
+        execution="docker",
+        wsl_diagnostic=wsl_runtime.get("reason"),
     )
 
 

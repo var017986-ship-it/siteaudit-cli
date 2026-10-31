@@ -36,11 +36,11 @@ echo                        \   .-.   /
 echo                         \ ( O ) /
 echo                          '-------'
 echo.
-echo   1. Quick passive scan   ^(10 pages, no active probes^)
-echo   2. Standard scan        ^(built-in checks, 50 pages^)
-echo   3. Deep SiteAudit scan  ^(up to 200 pages, SQLi/GraphQL checks^)
-echo   4. Full combined scan  ^(SiteAudit + installed engines; ZAP active^)
-echo   5. Upstream engines only ^(no built-in crawl; ZAP active^)
+echo   1. Quick passive scan     ^(10 pages, no active probes^)
+echo   2. Standard scan          ^(built-in checks, 50 pages^)
+echo   3. Deep SiteAudit scan    ^(up to 200 pages, SQLi/GraphQL^)
+echo   4. Full combined scan    ^(SiteAudit + active ZAP, if installed^)
+echo   5. Upstream engines only ^(ZAP active, if installed^)
 echo   6. Check engine readiness
 echo   7. Exit
 echo.
@@ -69,7 +69,7 @@ if defined RUN_ENGINE_DOCTOR (
     ".venv\Scripts\python.exe" -m siteaudit --doctor
     if errorlevel 1 (
         echo.
-        echo Some requested upstream engines are missing or unsupported here.
+        echo Some requested engines are missing or unsupported here.
         choice /C YN /N /M "Continue with available engines only? [Y/N] "
         if errorlevel 2 goto menu
     )
