@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import re
 from collections import deque
 from html.parser import HTMLParser
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
@@ -55,6 +57,47 @@ def _media_type(headers: dict[str, str]) -> str:
     return content_type.split(";", 1)[0].strip().lower()
 
 
+def _safe_header_value(value: object, maximum: int = 160) -> str:
+    return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())[:maximum]
+
+
+def _frame_ancestors_policy(value: str) -> tuple[bool, bool, bool]:
+    """Return whether any enforced policy restricts framing or permits all origins."""
+    has_frame_ancestors = False
+    has_restrictive_policy = False
+    has_broad_policy = False
+    # CSP's field value can contain a comma-separated list of serialized policies;
+    # repeated field lines are preserved as newline-separated values by the client.
+    policies = [policy.strip() for line in value.splitlines() for policy in line.split(",") if policy.strip()]
+    for policy in policies:
+        for directive in policy.split(";"):
+            parts = directive.strip().split()
+            if not parts or parts[0].lower() != "frame-ancestors":
+                continue
+            has_frame_ancestors = True
+            wildcard = False
+            for source in parts[1:]:
+                normalized = source.lower()
+                if normalized in {"*", "http:", "https:"}:
+                    wildcard = True
+                    break
+                if normalized.startswith(("http://*", "https://*")):
+                    try:
+                        if urlsplit(normalized).hostname == "*":
+                            wildcard = True
+                            break
+                    except ValueError:
+                        continue
+            # A restrictive policy is enforced along with all the others, so it
+            # prevents framing even if a separate policy is broader.
+            has_restrictive_policy |= not wildcard
+            has_broad_policy |= wildcard
+            break  # CSP uses the first occurrence of a directive in each policy.
+    if has_restrictive_policy:
+        return has_frame_ancestors, True, False
+    return has_frame_ancestors, False, has_broad_policy
+
+
 def _check_headers(ctx: ScanContext, response: ScanResponse, *, is_root: bool = False) -> None:
     if response.error or response.status_code is None:
         return
@@ -72,8 +115,62 @@ def _check_headers(ctx: ScanContext, response: ScanResponse, *, is_root: bool = 
     for name, title, severity, recommendation in checks:
         if name not in headers:
             _finding(ctx, f"header.{name}", title, severity, "high", url, f"HTTP response did not include {name}.", recommendation)
-    if is_document and "x-frame-options" not in headers and "frame-ancestors" not in headers.get("content-security-policy", "").lower():
-        _finding(ctx, "header.frame-protection", "Missing clickjacking frame protection", "low", "medium", url, "Neither X-Frame-Options nor CSP frame-ancestors was present.", "Set Content-Security-Policy frame-ancestors, or X-Frame-Options for legacy browser support.")
+    x_content_options = headers.get("x-content-type-options")
+    if x_content_options is not None and str(x_content_options).strip().lower() != "nosniff":
+        _finding(
+            ctx,
+            "header.x-content-type-options.invalid",
+            "X-Content-Type-Options has an ineffective value",
+            "low",
+            "high",
+            url,
+            f"Observed X-Content-Type-Options: {_safe_header_value(x_content_options)}",
+            "Set X-Content-Type-Options to exactly `nosniff`.",
+        )
+
+    if is_document:
+        csp_frame_present, csp_frame_protection, csp_frame_wildcard = _frame_ancestors_policy(
+            headers.get("content-security-policy", "")
+        )
+        x_frame_options = headers.get("x-frame-options")
+        x_frame_value = str(x_frame_options).strip().lower() if x_frame_options is not None else ""
+        x_frame_protection = x_frame_value in {"deny", "sameorigin"}
+        if csp_frame_wildcard:
+            evidence = "The enforced CSP frame-ancestors directive contains a wildcard or scheme-wide source, which permits broad framing."
+            _finding(
+                ctx,
+                "header.frame-protection.permissive-csp",
+                "CSP frame-ancestors permits broad embedding",
+                "low",
+                "high",
+                url,
+                evidence,
+                "Replace the wildcard with a restrictive source list such as `'none'` or `'self'` where appropriate.",
+            )
+        elif not csp_frame_protection and not x_frame_protection:
+            if x_frame_options is not None:
+                title = "X-Frame-Options has an ineffective value"
+                evidence = (
+                    f"Observed X-Frame-Options: {_safe_header_value(x_frame_options)}; "
+                    f"{'an empty' if csp_frame_present else 'no'} enforced CSP frame-ancestors source list was found."
+                )
+                finding_id = "header.frame-protection.invalid"
+            else:
+                title = "Missing clickjacking frame protection"
+                evidence = (
+                    "Neither a valid X-Frame-Options value nor a restrictive enforced CSP frame-ancestors source list was present."
+                )
+                finding_id = "header.frame-protection"
+            _finding(
+                ctx,
+                finding_id,
+                title,
+                "low",
+                "high" if x_frame_options is not None else "medium",
+                url,
+                evidence,
+                "Set X-Frame-Options to DENY or SAMEORIGIN, or define CSP frame-ancestors with at least one source.",
+            )
     if is_root and not https:
         _finding(ctx, "transport.http", "Target is served over HTTP", "high", "high", url, "The selected page URL uses HTTP, so the connection is not encrypted.", "Serve the site over HTTPS and redirect HTTP requests to HTTPS.", "transport")
     server = headers.get("server")
@@ -140,22 +237,140 @@ def _check_hsts(ctx: ScanContext, response: ScanResponse) -> None:
         )
 
 
+def _cookie_is_session_like(name: str) -> bool:
+    normalized = name.lower().replace("-", "_").replace(".", "_")
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    known_compounds = {
+        "sessionid", "sessiontoken", "sessid", "jsessionid", "phpsessid",
+        "aspsessionid", "authtoken", "accesstoken", "refreshtoken", "idtoken",
+        "rememberme", "remembertoken",
+    }
+    if compact in known_compounds:
+        return True
+    tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    return bool(tokens & {"session", "sess", "sid", "jsessionid", "phpsessid", "aspsessionid", "auth", "jwt"}) or (
+        "token" in tokens and bool(tokens & {"access", "refresh", "id"})
+    )
+
+
+def _is_secure_cookie_origin(url: str) -> bool:
+    parts = urlsplit(url)
+    if parts.scheme.lower() == "https":
+        return True
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _safe_cookie_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name[:80]) or "unnamed"
+
+
 def _check_cookies(ctx: ScanContext, response: ScanResponse) -> None:
     for raw_cookie in response.headers.get("set-cookie", "").split("\n"):
         if not raw_cookie.strip():
             continue
         parts = [part.strip() for part in raw_cookie.split(";")]
-        name = parts[0].partition("=")[0].strip() or "(unnamed)"
-        attributes = {part.partition("=")[0].strip().lower() for part in parts[1:]}
+        name, separator, _ = parts[0].partition("=")
+        name = name.strip()
+        if not separator or not name:
+            continue
+
+        attributes: dict[str, list[str | None]] = {}
+        for part in parts[1:]:
+            key, has_value, value = part.partition("=")
+            key = key.strip().lower()
+            if key:
+                attributes.setdefault(key, []).append(value.strip() if has_value else None)
+
+        safe_name = _safe_cookie_name(name)
+        present = set(attributes)
+        secure = "secure" in present
+        https = urlsplit(response.url).scheme == "https"
+        session_like = _cookie_is_session_like(name)
+
         missing = []
-        if urlsplit(response.url).scheme == "https" and "secure" not in attributes:
+        if https and not secure:
             missing.append("Secure")
-        if "httponly" not in attributes:
+        if "httponly" not in present:
             missing.append("HttpOnly")
-        if "samesite" not in attributes:
+        if "samesite" not in present:
             missing.append("SameSite")
         if missing:
-            _finding(ctx, f"cookie.flags.{name}", f"Cookie {name} is missing security attributes", "low", "medium", response.url, f"Set-Cookie omitted: {', '.join(missing)}.", "Set Secure on HTTPS cookies, HttpOnly on cookies not used by JavaScript, and an appropriate SameSite value.", "cookies")
+            severity = "low" if session_like else "info"
+            confidence = "medium" if session_like else "low"
+            context = "The name resembles a session or authentication cookie." if session_like else "The cookie purpose is not identifiable from its name; review whether these attributes apply."
+            _finding(
+                ctx,
+                f"cookie.flags.{safe_name}",
+                f"Cookie {safe_name} is missing security attributes",
+                severity,
+                confidence,
+                response.url,
+                f"Set-Cookie omitted: {', '.join(missing)}. {context}",
+                "Set Secure on HTTPS cookies, HttpOnly on cookies not used by JavaScript, and an appropriate SameSite value.",
+                "cookies",
+            )
+
+        same_site_values = attributes.get("samesite", [])
+        normalized_same_site = [value.lower() for value in same_site_values if value is not None]
+        if same_site_values and (
+            any(value is None or value.lower() not in {"lax", "strict", "none"} for value in same_site_values)
+            or len(set(normalized_same_site)) > 1
+        ):
+            _finding(
+                ctx,
+                f"cookie.samesite.invalid.{safe_name}",
+                f"Cookie {safe_name} has an invalid SameSite attribute",
+                "info",
+                "high",
+                response.url,
+                "The Set-Cookie SameSite attribute is empty, duplicated with conflicting values, or outside Strict, Lax, and None.",
+                "Use one SameSite value: Strict, Lax, or None. SameSite=None requires Secure.",
+                "cookies",
+            )
+        elif normalized_same_site and normalized_same_site[-1] == "none" and not secure:
+            _finding(
+                ctx,
+                f"cookie.samesite.none-without-secure.{safe_name}",
+                f"Cookie {safe_name} uses SameSite=None without Secure",
+                "low",
+                "high",
+                response.url,
+                "SameSite=None is present without the Secure attribute, so modern browsers reject this cookie.",
+                "Add Secure when using SameSite=None and serve the cookie only over HTTPS.",
+                "cookies",
+            )
+
+        prefix_issues: list[str] = []
+        if name.startswith("__Secure-") or name.startswith("__Host-"):
+            if not secure:
+                prefix_issues.append("Secure is missing")
+            if not _is_secure_cookie_origin(response.url):
+                prefix_issues.append("cookie was set from a non-secure origin")
+        if name.startswith("__Host-"):
+            paths = attributes.get("path", [])
+            if not paths or paths[-1] != "/":
+                prefix_issues.append("Path is not /")
+            if "domain" in present:
+                prefix_issues.append("Domain is present")
+        if prefix_issues:
+            _finding(
+                ctx,
+                f"cookie.prefix.invalid.{safe_name}",
+                f"Cookie {safe_name} violates its security prefix requirements",
+                "low",
+                "high",
+                response.url,
+                "The Set-Cookie attributes do not satisfy the case-sensitive "
+                f"{('__Host-' if name.startswith('__Host-') else '__Secure-')} prefix requirements: {', '.join(prefix_issues)}. Browsers may reject the cookie.",
+                "For prefixed cookies, set Secure and serve them from HTTPS. For __Host- cookies, also set Path=/ and omit Domain.",
+                "cookies",
+            )
 
 
 _STATE_CHANGING_WORDS = {"logout", "signout", "delete", "remove", "unsubscribe", "purchase", "checkout", "payment", "pay", "cancel", "deactivate", "reset", "transfer", "submit", "destroy", "revoke"}

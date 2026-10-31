@@ -4,7 +4,7 @@ SiteAudit combines independent checks behind one CLI. The names below describe i
 
 | Reference tool | Included now | Not included yet |
 | --- | --- | --- |
-| OWASP ZAP | Same-host crawl; document-aware security-header checks, origin-root HSTS max-age validation, per-response cookies and `nosniff`, mixed-content, weak-CSP, stack-trace and CORS observations; JSON findings | Intercepting proxy, authenticated sessions, browser/AJAX spider, full active rule set, API imports |
+| OWASP ZAP | Same-host crawl; document-aware security-header checks and value validation, origin-root HSTS max-age validation, cookie flag/SameSite/prefix checks, mixed-content, weak-CSP, stack-trace and CORS observations; JSON findings | Intercepting proxy, authenticated sessions, browser/AJAX spider, full active rule set, API imports |
 | Nuclei | Five bundled signatures, including public API specification discovery, plus up to 27 user-supplied JSON rules; fixed-path literal matchers and source references | Community CVE template library, YAML compatibility, workflows, code or network callbacks in templates |
 | Nikto | Bounded HEAD probes for common exposed paths; compares metadata with a random missing-path response to filter common catch-all pages; checks OPTIONS method observations | Nikto's full test database, plugin collection, mutation/wordlist modes and version database |
 | Wapiti | Bounded crawler; parsed inert HTML-marker reflection, database error indicators, un-followed open-redirect probes, opt-in one-field POST marker checks, and a bounded arithmetic-only SSTI check | Authenticated crawling, upload, SSRF, XXE, time-based and broader fuzzing modules |
