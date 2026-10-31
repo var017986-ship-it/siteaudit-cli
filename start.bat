@@ -15,29 +15,43 @@ set "PATH=%~dp0.venv\Scripts;%PATH%"
 
 :menu
 cls
+set "SCAN_ARGS="
 set "RUN_ENGINE_DOCTOR="
-echo                 .-=================-.
-echo              .-'     SITEAUDIT      '-.
-echo             /         .-----.         \
-echo            /         /  .-.  \         \
-echo           ^|         ^|  ( o )  ^|         ^|
-echo           ^|          \  ^|^|  /          ^|
-echo           ^|       .---'----'---.        ^|
-echo           ^|      /    .-----.    \       ^|
-echo           ^|     ^|    ^(  O  ^)    ^|      ^|
-echo           ^|      \    '-----'    /      ^|
-echo            \      '-------------'      /
-echo             '-.___________________.-'
+echo                    .-=========-.
+echo                   /  .-------.  \\
+echo                  ^|  /  o o  \\  ^|
+echo                  ^| ^|    ^    ^| ^|
+echo                  ^|  \\  '-'  /  ^|
+echo                   \\  '-----'  /
+echo                    '---.____.---'
+echo                 .---'  SITEAUDIT  '---.
+echo                      .----.   .----.
+echo                     /      \ /      \
+echo                    /        ^|        \
+echo                   ^|         ^|         ^|
+echo                  /          ^|          \
+echo                 /_____      ^|      _____\
+echo                       \     ^|     /
+echo                        \   .-.   /
+echo                         \ ( O ) /
+echo                          '-------'
 echo.
 echo   1. Quick passive scan   ^(10 pages, no active probes^)
 echo   2. Standard scan        ^(built-in checks, 50 pages^)
 echo   3. Deep SiteAudit scan  ^(up to 200 pages, SQLi/GraphQL checks^)
 echo   4. Full combined scan  ^(SiteAudit + installed engines; ZAP active^)
 echo   5. Upstream engines only ^(no built-in crawl; ZAP active^)
-echo   6. Exit
+echo   6. Check engine readiness
+echo   7. Exit
 echo.
-choice /C 123456 /N /M "Choose a mode: "
-if errorlevel 6 goto end
+choice /C 1234567 /N /M "Choose a mode: "
+if errorlevel 7 goto end
+if errorlevel 6 (
+    ".venv\Scripts\python.exe" -m siteaudit --doctor
+    echo.
+    pause
+    goto menu
+)
 if errorlevel 5 (
     set "SCAN_ARGS=--external-only --max-pages 100 --max-depth 3 --delay 1 --engine all --engine-timeout 300 --zap-active"
     set "RUN_ENGINE_DOCTOR=1"
@@ -66,7 +80,7 @@ set /p "SITEAUDIT_TARGET=Enter the URL you are authorized to scan: "
 if not defined SITEAUDIT_TARGET goto menu
 set "REPORT=reports\scan-%RANDOM%-%RANDOM%.json"
 echo.
-".venv\Scripts\python.exe" -m siteaudit %SCAN_ARGS% --output "%REPORT%"
+".venv\Scripts\python.exe" -m siteaudit "%SITEAUDIT_TARGET%" %SCAN_ARGS% --output "%REPORT%"
 set "SITEAUDIT_TARGET="
 set "RUN_ENGINE_DOCTOR="
 echo.

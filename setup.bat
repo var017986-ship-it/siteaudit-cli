@@ -2,12 +2,17 @@
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
+set "PYTHONUTF8=1"
 
 echo.
-echo      .---------------------------------.
-echo      ^|        SITEAUDIT SETUP          ^|
-echo      ^|   Safe, scoped web assessment   ^|
-echo      '---------------------------------'
+echo                    .-=============-.
+echo                   /   .--------.    \
+echo                  ^|   /  o  o   \    ^|
+echo                  ^|  ^|    ^    ^|     ^|
+echo                   \   \ '----' /    /
+echo                .---'----\____/----'---.
+echo               /       SITEAUDIT SETUP   \
+echo               '-------------------------'
 
 if not exist ".venv\Scripts\python.exe" (
     where py >nul 2>nul
@@ -30,10 +35,13 @@ echo.
 echo SiteAudit is installed. Run start.bat to choose a scan mode.
 if /I "%~1"=="/quiet" goto setup_done
 echo.
-echo Optional: setup-engines.bat downloads Nuclei templates, installs Wapiti locally,
-echo and pulls the official Nikto and ZAP Docker images when Docker is available.
-choice /C YN /N /M "Set up supported upstream engines now? [Y/N] "
-if errorlevel 2 goto setup_done
+echo.
+echo   1. Finish with SiteAudit core only
+echo   2. Set up available upstream engines
+choice /C 12 /N /M "Choose setup option: "
+if errorlevel 2 goto setup_engines
+goto setup_done
+:setup_engines
 call "%~dp0setup-engines.bat" /quiet
 if errorlevel 1 echo Upstream setup was incomplete. Run siteaudit --doctor for details.
 :setup_done
