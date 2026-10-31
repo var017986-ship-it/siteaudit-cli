@@ -11,11 +11,17 @@ SiteAudit combines independent checks behind one CLI. The names below describe i
 | W3AF | Static plugin registry; credentialed CORS reflection check and low-confidence POST-form CSRF token-name heuristic | W3AF's broad plugin set, exploit verification, authentication profiles and audit framework |
 | GraphQL APIs | Optional fixed read-only introspection query to up to three same-host endpoints; reports only whether the query type name is exposed | Full schema enumeration, authentication profiles, mutation fuzzing and exploit testing |
 
+## Optional upstream engines
+
+The CLI can invoke separately installed Nuclei, Nikto, Wapiti, OWASP ZAP (Docker), and W3AF processes with repeated `--engine` flags or `--engine all`. Their findings are normalized into the SiteAudit report. Their source code and signature databases are not bundled. ZAP uses baseline/passive mode by default; `--zap-active` opts into its active scan.
+
+Upstream processes do not share SiteAudit's request counter or global delay. They apply their own runtime, depth, rate, or polite-mode settings where available. Wapiti has no global requests-per-second setting. W3AF does not enforce a hard page cap and its crawler may submit smart-filled forms. Imported findings are checked against the selected host and port, but this does not prevent every upstream engine from making an out-of-scope request before the result is imported. Nuclei templates in particular should be reviewed; its local-network restriction is not a same-host allow-list. Nikto matches are reported at informational severity because its export does not provide a normalized severity. On Windows, the W3AF adapter reports unsupported, and Wapiti may require WSL or a Linux container.
+
 ## Shared execution model
 
 - `siteaudit <target>` runs the core crawl, passive response checks, and bounded active plugins.
 - `--passive` runs the core crawl and passive response checks, with all active plugins disabled.
-- Scanner modules share the same request budget, delay, host-and-port scope, DNS pinning, response cap, and finding schema.
+- Built-in Python modules share SiteAudit's request budget, delay, host-and-port scope, DNS pinning, response cap, and finding schema. Optional upstream subprocess engines apply their own controls; their requests do not count against the built-in budget, their scope behavior differs by engine, and their findings are normalized into the shared schema.
 - Reports show which plugins ran, checks or requests attempted where available, findings added, severity, confidence, evidence, remediation, and references.
 - Results are indicators from a black-box scan. They cannot prove that the whole application is secure or that every suspected issue is exploitable.
 

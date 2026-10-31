@@ -55,6 +55,20 @@ python -m siteaudit https://example.com --output report.json
 
 Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode options. The default run performs bounded GET/HEAD/OPTIONS checks; `--passive` skips template, server-path, and input probes. Private and loopback IPs require `--allow-private`. Review the target and options before each scan. Query values are redacted in saved URLs, but reports can still contain hostnames and server metadata.
 
+## Optional upstream engines
+
+SiteAudit can invoke separately installed Nuclei, Nikto, Wapiti, OWASP ZAP, and W3AF engines and merge their findings into its JSON report. Install the upstream tools separately; their source code and signature databases are not copied into this repository. Run one or more with repeated `--engine` flags, or use `--engine all`:
+
+```powershell
+siteaudit https://example.com --engine all --engine-timeout 300 --output report.json
+```
+
+For Nuclei, optionally provide a local template file or directory with `--nuclei-templates`; otherwise its installed template pack is used. HTTP templates run, redirects and Interactsh are disabled. Review custom templates: Nuclei's local-network restriction is not a same-host allow-list, and filtering imported findings cannot undo a request already sent. For ZAP, pre-pull `ghcr.io/zaproxy/zaproxy:stable` into Docker. Its default baseline mode spiders and passively analyzes the site. `--engine zap --zap-active` selects ZAP's full active scan, which sends attack probes. `--engine-timeout` bounds each external process; `--delay` is applied where supported. External tools maintain separate HTTP request counters and do not share SiteAudit's internal request budget; Wapiti has no global requests-per-second option. Nikto matches are reported at informational severity because its export provides test matches but no normalized severity field. W3AF has no hard page limit and its crawler may submit smart-filled forms. On Windows W3AF is reported as unavailable; Wapiti may need WSL or Docker, and Nikto needs Perl. The JSON report records each requested engine as `completed`, `partial`, `unavailable`, or `error`.
+
+The built-in scanner strictly limits its own requests to the selected host and port. External engines have their own scope controls, but SiteAudit does not intercept all their requests: redirects, custom templates, or discovered links may reach a different address. Findings outside the selected host and port are discarded when importing the report, but that does not prevent the request itself. Run external engines only against targets and with templates you are authorized to assess.
+
+Upstream engines must be installed on the system. Wapiti may require WSL or Docker on Windows; W3AF requires an older Linux/macOS setup and is reported unavailable on Windows; Nikto requires Perl. Only run them on targets you are authorized to assess.
+
 ## Checks
 
 - HTTPS availability, redirect behavior, document security headers (including effective frame-protection values), origin-root HSTS max-age, exact `nosniff` validation, and cookie checks for session-like names, `SameSite=None` without `Secure`, invalid SameSite values, and `__Secure-`/`__Host-` prefix requirements.

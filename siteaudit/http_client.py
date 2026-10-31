@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from functools import partial
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from . import __version__
 from .models import Finding
 
 _GRAPHQL_INTROSPECTION_BODY = b'{"query":"{ __schema { queryType { name } } }"}'
@@ -321,7 +322,7 @@ class ScanContext:
                         time.sleep(wait_for)
                     self._last_request_at = time.monotonic()
 
-                request_headers = {"User-Agent": "SiteAudit/0.13.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
+                request_headers = {"User-Agent": f"SiteAudit/{__version__} (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
                 if headers:
                     request_headers.update(headers)
                 if verb == "POST":

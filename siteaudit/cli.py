@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __version__
 from .context import ScanContext
 from .core_checks import run as run_core
+from .external_engines import run as run_external_engines
 from .models import redact_url
 from .plugins import PluginExecutionError, run_plugins
 
@@ -26,6 +27,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sqli-probes", action="store_true", help="Run repeated boolean checks on up to two numeric GET parameters; may change GET query behavior")
     parser.add_argument("--graphql-probe", action="store_true", help="Send a bounded read-only GraphQL introspection query to up to three same-host endpoints")
     parser.add_argument("--templates-file", help="Load safe JSON or restricted Nuclei YAML templates from a local file")
+    parser.add_argument("--engine", action="append", choices=("all", "nuclei", "nikto", "wapiti", "zap", "w3af"), default=[], help="Also run an installed upstream scanner; repeat or use 'all'")
+    parser.add_argument("--engine-timeout", type=int, default=300, help="Maximum runtime per upstream scanner in seconds (30-1800, default: 300)")
+    parser.add_argument("--nuclei-templates", help="Use this local Nuclei template file/directory instead of its installed default pack")
+    parser.add_argument("--zap-active", action="store_true", help="Use ZAP full active scan instead of passive baseline; may change target behavior")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     return parser
 
@@ -39,6 +44,18 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--delay must be between 0.1 and 10 seconds")
     if not 1 <= args.timeout <= 60:
         parser.error("--timeout must be between 1 and 60 seconds")
+    if not 30 <= args.engine_timeout <= 1800:
+        parser.error("--engine-timeout must be between 30 and 1800 seconds")
+    if args.passive and args.engine:
+        parser.error("--engine cannot be used with --passive")
+    if args.nuclei_templates and "nuclei" not in args.engine and "all" not in args.engine:
+        parser.error("--nuclei-templates requires --engine nuclei")
+    if args.nuclei_templates:
+        nuclei_templates = Path(args.nuclei_templates).expanduser()
+        if not nuclei_templates.exists() or not (nuclei_templates.is_file() or nuclei_templates.is_dir()):
+            parser.error("--nuclei-templates must point to an existing local template file or directory")
+    if args.zap_active and "zap" not in args.engine and "all" not in args.engine:
+        parser.error("--zap-active requires --engine zap")
     if args.passive and args.post_probes:
         parser.error("--post-probes cannot be used with --passive")
     if args.passive and args.sqli_probes:
@@ -62,6 +79,10 @@ def run_scan(args: argparse.Namespace) -> dict:
         "allow_sqli_probes": args.sqli_probes,
         "allow_graphql_probe": args.graphql_probe,
         "templates_file": args.templates_file,
+        "external_engines": args.engine,
+        "external_engine_timeout": args.engine_timeout,
+        "nuclei_templates": args.nuclei_templates,
+        "zap_active": args.zap_active,
         "max_response_bytes": 131072,
         "max_requests": max(80, args.max_pages * 8),
         "max_cached_responses": 100,
@@ -76,6 +97,10 @@ def run_scan(args: argparse.Namespace) -> dict:
     # The core discovery phase builds the bounded URL/form scope shared by the plugins.
     run_core(ctx)
     plugin_results, plugins_enabled = run_plugins(ctx, include_active=not args.passive)
+    external_results = run_external_engines(ctx)
+    if external_results:
+        plugin_results["external_engines"] = external_results
+        plugins_enabled.extend(f"external_{name}" for name in external_results)
     options["plugins_enabled"] = plugins_enabled
 
     finished = datetime.now(timezone.utc)
@@ -86,7 +111,7 @@ def run_scan(args: argparse.Namespace) -> dict:
         "target": redact_url(ctx.base_url),
         "started_at": started.isoformat(),
         "completed_at": finished.isoformat(),
-        "settings": {**{key: value for key, value in options.items() if key != "templates_file"}, "custom_templates_enabled": bool(args.templates_file)},
+        "settings": {**{key: value for key, value in options.items() if key not in {"templates_file", "nuclei_templates"}}, "custom_templates_enabled": bool(args.templates_file)},
         "summary": {"findings": len(findings), "severity_counts": counts, "pages_visited": len(ctx.discovered_urls), "requests_sent": ctx.request_count, "responses_cached": len(ctx.discovered_responses), "response_cache_limited": ctx.response_cache_limited, "plugin_results": plugin_results},
         "findings": [item.to_dict() for item in findings],
     }
