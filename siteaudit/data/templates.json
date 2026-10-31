@@ -76,6 +76,65 @@
       "references": [
         "https://github.com/django/django/blob/main/django/views/templates/technical_404.html"
       ]
+    },
+    {
+      "id": "api.openapi.spec-public",
+      "name": "OpenAPI specification is publicly reachable",
+      "severity": "info",
+      "confidence": "medium",
+      "category": "api-documentation-exposure",
+      "method": "GET",
+      "path": "/openapi.json",
+      "max_bytes": 16384,
+      "match": {
+        "status": [200],
+        "headers": [
+          {
+            "name": "content-type",
+            "contains": "json"
+          }
+        ],
+        "body_contains": [
+          "\"openapi\"",
+          "\"paths\""
+        ],
+        "condition": "all"
+      },
+      "evidence": "An unauthenticated GET to /openapi.json returned JSON containing OpenAPI specification markers. The response body is not included in the report; public API documentation may be intentional.",
+      "remediation": "Review whether the API specification is intended to be public. If it exposes internal routes, restrict access or publish a curated specification.",
+      "references": [
+        "https://spec.openapis.org/oas/latest.html"
+      ]
+    },
+    {
+      "id": "api.swagger.v3-docs-public",
+      "name": "Swagger / OpenAPI v3 documentation is publicly reachable",
+      "severity": "info",
+      "confidence": "medium",
+      "category": "api-documentation-exposure",
+      "method": "GET",
+      "path": "/v3/api-docs",
+      "max_bytes": 16384,
+      "match": {
+        "status": [200],
+        "headers": [
+          {
+            "name": "content-type",
+            "contains": "json"
+          }
+        ],
+        "body_contains": [
+          "\"openapi\"",
+          "\"paths\""
+        ],
+        "condition": "all"
+      },
+      "evidence": "An unauthenticated GET to /v3/api-docs returned JSON containing OpenAPI specification markers. The response body is not included in the report; public API documentation may be intentional.",
+      "remediation": "Review whether the API specification is intended to be public. If it exposes internal routes, restrict access or publish a curated specification.",
+      "references": [
+        "https://spec.openapis.org/oas/latest.html",
+        "https://springdoc.org/"
+      ]
     }
   ]
 }

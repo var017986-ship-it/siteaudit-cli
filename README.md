@@ -50,10 +50,10 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 - Low-impact GET-only checks on discovered query parameters for reflected input, common database error indicators, and open redirects on redirect-like parameters; redirect probes are never followed.
 - A small modular W3AF-inspired plugin set for credentialed arbitrary-origin CORS reflection and POST forms with no recognizable CSRF token field; this CSRF heuristic never submits forms.
 - Local JSON-template checks with strict GET/HEAD methods and literal response matchers; templates cannot execute code or define arbitrary payloads.
-- Up to 29 additional reviewed local JSON templates through `--templates-file` (32 combined with the bundled rules).
+- Up to 27 additional reviewed local JSON templates through `--templates-file` (32 combined with the five bundled rules).
 - JSON report with severity, confidence, evidence, URL, remediation guidance, and references for template findings.
 
-The bundled templates look for the Go pprof profile index, Spring Boot Actuator mappings, and Django's technical 404 page with debug mode enabled. These detect exposed diagnostic surfaces; they are not a general CVE database.
+The bundled templates look for the Go pprof profile index, Spring Boot Actuator mappings, Django's technical 404 page with debug mode enabled, and public OpenAPI specifications at two common paths. API documentation is reported as informational because it is often intentionally public. These rules detect exposed diagnostic surfaces; they are not a general CVE database.
 
 See [FEATURES.md](FEATURES.md) for the coverage map against the tools that inspired this project.
 
