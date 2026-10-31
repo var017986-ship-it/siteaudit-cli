@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 from secrets import token_hex
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 
@@ -23,6 +24,8 @@ _STATEFUL_PATH_PARTS = (
     "logout", "log-out", "delete", "remove", "purchase", "checkout", "pay",
     "unsubscribe", "reset", "transfer", "submit",
 )
+_REDIRECT_PARAMETER_PARTS = ("redirect", "return", "next", "continue", "dest", "url", "uri", "callback", "target")
+_REDIRECT_PROBE = "https://siteaudit.invalid/"
 _STATE_CHANGING_WORDS = {"logout", "signout", "delete", "remove", "unsubscribe", "purchase", "checkout", "payment", "pay", "cancel", "deactivate", "reset", "transfer", "submit", "destroy", "revoke"}
 
 _SQL_ERROR_MARKERS = (
@@ -172,6 +175,11 @@ def _is_sensitive_key(key: str) -> bool:
     return any(part in normalized for part in _SENSITIVE_PARAMETER_PARTS)
 
 
+def _is_redirect_parameter(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(part in normalized for part in _REDIRECT_PARAMETER_PARTS)
+
+
 def _is_stateful_url(url: str) -> bool:
     parsed = urlsplit(url)
     if any(part in parsed.path.lower() for part in _STATEFUL_PATH_PARTS):
@@ -205,8 +213,9 @@ def _candidate_urls(ctx: object) -> list[str]:
 
 
 def _record(ctx: object, *, finding_id: str, title: str, severity: str, confidence: str,
-            url: str, evidence: str, recommendation: str, category: str) -> None:
-    ctx.add_finding(  # type: ignore[attr-defined]
+            url: str, evidence: str, recommendation: str, category: str,
+            references: list[str] | None = None) -> None:
+    fields: dict[str, Any] = dict(
         id=finding_id,
         title=title,
         severity=severity,
@@ -216,6 +225,9 @@ def _record(ctx: object, *, finding_id: str, title: str, severity: str, confiden
         recommendation=recommendation,
         category=category,
     )
+    if references:
+        fields["references"] = references
+    ctx.add_finding(**fields)  # type: ignore[attr-defined]
 
 
 def run(ctx: object) -> int:
@@ -334,6 +346,48 @@ def run(ctx: object) -> int:
                     ),
                     category="input-validation",
                 )
+
+            if requests_used >= _MAX_REQUESTS:
+                break
+            if _is_redirect_parameter(key) and requests_used < _MAX_REQUESTS:
+                redirect_probe_url = _replace_query_value(form_url, key, _REDIRECT_PROBE)
+                if _same_host(redirect_probe_url, ctx):
+                    try:
+                        redirect_response = ctx.request(
+                            "GET",
+                            redirect_probe_url,
+                            max_bytes=1024,
+                            follow_redirects=False,
+                        )
+                    except Exception:
+                        redirect_response = None
+                    requests_used += 1
+                    if redirect_response is not None:
+                        location = (getattr(redirect_response, "headers", {}) or {}).get("location", "")
+                        resolved_location = urljoin(getattr(redirect_response, "url", redirect_probe_url), location)
+                        try:
+                            location_host = (urlsplit(resolved_location).hostname or "").lower()
+                        except ValueError:
+                            location_host = ""
+                        if _status_code(redirect_response) in {301, 302, 303, 307, 308} and location_host == "siteaudit.invalid":
+                            _record(
+                                ctx,
+                                finding_id="unvalidated-open-redirect",
+                                title="Input can redirect visitors to an arbitrary external host",
+                                severity="medium",
+                                confidence="high",
+                                url=redirect_probe_url,
+                                evidence=(
+                                    f"GET parameter {key!r} set to a reserved `.invalid` test host produced an HTTP redirect to that host. "
+                                    "The scanner did not follow the redirect."
+                                ),
+                                recommendation=(
+                                    "Accept only relative destinations or validate redirect destinations against a strict allowlist. "
+                                    "Do not derive a Location header directly from an untrusted parameter."
+                                ),
+                                category="open-redirect",
+                                references=["https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html"],
+                            )
 
             if requests_used >= _MAX_REQUESTS:
                 break

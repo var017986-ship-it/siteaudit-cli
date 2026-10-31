@@ -39,7 +39,7 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 - Same-host page discovery with configurable depth and page/request limits.
 - Bounded in-memory response cache (up to 100 responses and 2 MB) for passive checks of mixed content, weak CSP, stack-trace leakage, and CORS headers.
 - A small curated set of common web-server exposure and configuration checks.
-- Low-impact GET-only checks on discovered query parameters for reflected input and common database error indicators.
+- Low-impact GET-only checks on discovered query parameters for reflected input, common database error indicators, and open redirects on redirect-like parameters; redirect probes are never followed.
 - A small modular W3AF-inspired plugin set for credentialed arbitrary-origin CORS reflection and POST forms with no recognizable CSRF token field; forms are inspected but never submitted.
 - Local JSON-template checks with strict GET/HEAD methods and literal response matchers; templates cannot execute code or define arbitrary payloads.
 - JSON report with severity, confidence, evidence, URL, remediation guidance, and references for template findings.
