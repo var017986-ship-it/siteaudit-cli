@@ -321,7 +321,7 @@ class ScanContext:
                         time.sleep(wait_for)
                     self._last_request_at = time.monotonic()
 
-                request_headers = {"User-Agent": "SiteAudit/0.8.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
+                request_headers = {"User-Agent": "SiteAudit/0.9.0 (+authorized security testing)", "Accept": "text/html,application/json,*/*;q=0.5"}
                 if headers:
                     request_headers.update(headers)
                 if verb == "POST":

@@ -54,6 +54,7 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 - Bounded in-memory response cache (up to 100 responses and 2 MB) for passive checks of mixed content, weak CSP, stack-trace leakage, and CORS headers.
 - A small curated set of common web-server exposure checks. Sensitive paths use bodyless HEAD requests and are compared with a random missing-path response to filter common soft-404 or single-page-app catch-all responses.
 - Low-impact GET-only checks on discovered query parameters for parsed inert HTML-marker reflection, common database error indicators, and open redirects on redirect-like parameters; redirect probes are never followed, and reflection does not confirm XSS.
+- A bounded server-side template injection check sends only nonce-wrapped multiplication expressions to at most two non-sensitive GET parameters; it reports evaluation only when both computed outputs match.
 - A small modular W3AF-inspired plugin set for credentialed arbitrary-origin CORS reflection and POST forms with no recognizable CSRF token field; this CSRF heuristic never submits forms.
 - Optional GraphQL introspection check using one fixed read-only query on up to three same-host endpoints; the schema is not saved and the result is informational.
 - Local JSON-template checks with strict GET/HEAD methods and literal response matchers; templates cannot execute code or define arbitrary payloads.

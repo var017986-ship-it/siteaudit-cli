@@ -21,6 +21,7 @@ PLUGIN_REGISTRY: tuple[PluginSpec, ...] = (
     PluginSpec("templates", "template_engine", "active", "templates_attempted"),
     PluginSpec("nikto", "nikto_checks", "active", "requests_sent"),
     PluginSpec("wapiti", "wapiti_checks", "active", "requests_sent"),
+    PluginSpec("ssti", "ssti_checks", "active", "requests_sent"),
     PluginSpec("graphql_introspection", "graphql_checks", "active", "requests_sent"),
     PluginSpec("w3af", "w3af_checks", "active"),
 )
