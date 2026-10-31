@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
-from .external_support import EngineRunError, EngineUnavailable
+from .external_support import EngineRunError, EngineUnavailable, find_executable
 from .external_scope_proxy import ScopeProxy
 
 
@@ -52,12 +53,13 @@ def run(ctx: Any, progress=None) -> dict[str, dict[str, Any]]:
         scope_proxy = None
         try:
             adapter = import_module(f".{module_name}", package=__package__)
+            remote_proxy = name == "zap" or (name == "nikto" and not _nikto_native_ready())
             with ScopeProxy(
                 ctx,
                 request_limit=max_connections,
                 delay=float(options.get("delay", 0.5)),
                 timeout=float(options.get("timeout", 10)),
-                remote_access=name == "zap",
+                remote_access=remote_proxy,
             ) as scope_proxy:
                 options["external_proxy_url"] = scope_proxy.url
                 options["external_proxy_auth_url"] = scope_proxy.auth_url
@@ -70,7 +72,15 @@ def run(ctx: Any, progress=None) -> dict[str, dict[str, Any]]:
         except EngineUnavailable as exc:
             result = {"status": "unavailable", "error": str(exc)[:500]}
         except (EngineRunError, OSError, ValueError) as exc:
-            result = {"status": "error", "error": str(exc)[:500]}
+            proxy_stats = scope_proxy.stats() if scope_proxy is not None else {}
+            had_scoped_traffic = bool(
+                proxy_stats.get("http_requests_authorized", 0)
+                or proxy_stats.get("https_tunnels_authorized", 0)
+            )
+            result = {
+                "status": "partial" if had_scoped_traffic else "error",
+                "error": str(exc)[:500],
+            }
         except Exception as exc:
             result = {"status": "error", "error": f"Unexpected adapter failure: {exc}"[:500]}
         finally:
@@ -94,8 +104,31 @@ def run(ctx: Any, progress=None) -> dict[str, dict[str, Any]]:
                 or proxy_stats["http_response_byte_limit_reached"]
             ) and result.get("status") == "completed":
                 result["status"] = "partial"
+            if (
+                name == "nuclei"
+                and proxy_stats["http_requests_authorized"] + proxy_stats["https_tunnels_authorized"] == 0
+                and result.get("status") == "completed"
+            ):
+                result["status"] = "error"
+                result["error"] = "Nuclei completed without sending a request through the scope proxy."
+            elif (
+                result.get("status") == "error"
+                and proxy_stats["http_requests_authorized"] + proxy_stats["https_tunnels_authorized"] > 0
+                and "time limit" in str(result.get("error", "")).lower()
+            ):
+                result["status"] = "partial"
         result["findings_added"] = len(ctx.findings) - findings_before
         results[name] = result
         if progress:
             progress("done", index, len(names), f"{name}: {result.get('status', 'unknown')}")
     return results
+
+
+def _nikto_native_ready() -> bool:
+    try:
+        executable = find_executable("nikto", "nikto.pl")
+        if Path(executable).suffix.lower() == ".pl":
+            find_executable("perl")
+        return True
+    except EngineUnavailable:
+        return False

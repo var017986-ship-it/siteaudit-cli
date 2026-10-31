@@ -6,18 +6,21 @@ import json
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .external_support import EngineRunError, EngineUnavailable, add_engine_finding, find_executable, run_command
+from .external_support import EngineRunError, EngineUnavailable, add_engine_finding, find_executable, get_engine_home, run_command
+from .external_support import ProcessOutput
 
 
 _NETWORK_DSL_HELPER = re.compile(r"(?<![A-Za-z0-9_])(?:resolve|public_ip|jarm)\s*\(", re.IGNORECASE)
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TEMPLATE_EXTENSIONS = {".yaml", ".yml", ".json"}
 _MAX_TEMPLATE_FILES = 20_000
 _MAX_TEMPLATE_BYTES = 512_000_000
-_MAX_SINGLE_TEMPLATE_BYTES = 4_000_000
+_MAX_SINGLE_TEMPLATE_BYTES = 16_000_000
 
 
 def _template_source(configured: Any) -> tuple[Path, str]:
@@ -25,8 +28,9 @@ def _template_source(configured: Any) -> tuple[Path, str]:
         source = Path(configured).expanduser()
         label = "custom local path"
     else:
-        source = Path.home() / "nuclei-templates"
-        label = "installed default template directory"
+        managed_templates = get_engine_home() / "nuclei-templates"
+        source = managed_templates if managed_templates.exists() else Path.home() / "nuclei-templates"
+        label = "SiteAudit-managed templates" if source == managed_templates else "installed default template directory"
     if not source.exists() or not (source.is_file() or source.is_dir()):
         raise EngineRunError(
             f"Nuclei templates not found at {source}; set --nuclei-templates to a reviewed local file or directory"
@@ -91,6 +95,8 @@ def run(ctx: Any) -> dict[str, Any]:
     templates_path, template_source = _template_source(configured_templates)
 
     timeout = float((ctx.options or {}).get("external_engine_timeout", 300))
+    started_at = time.monotonic()
+    version = _version(executable, timeout=min(timeout, 15))
     request_timeout = max(1, int((ctx.options or {}).get("timeout", 10)))
     delay = max(0.1, float((ctx.options or {}).get("delay", 0.5)))
     # Nuclei accepts an integer per-second rate. Floor to avoid exceeding the
@@ -126,10 +132,25 @@ def run(ctx: Any) -> dict[str, Any]:
             "-proxy-internal",
             "-t", str(safe_templates),
         ]
-        if not (ctx.options or {}).get("allow_private"):
-            command.append("-restrict-local-network-access")
-
-        process = run_command(command, timeout=timeout)
+        # Route even internal references through the scope proxy. Nuclei's
+        # local-network guard misclassified this publicly routable target;
+        # host/port filtering and network-DSL screening are the scope controls.
+        remaining_timeout = timeout - (time.monotonic() - started_at)
+        if remaining_timeout <= 0:
+            raise EngineRunError("Nuclei template preparation exceeded the engine time limit")
+        scan_error = None
+        try:
+            process = run_command(command, timeout=remaining_timeout)
+        except EngineRunError as exc:
+            if not (exc.partial_stdout or exc.partial_stderr):
+                raise
+            scan_error = str(exc)
+            process = ProcessOutput(
+                returncode=1,
+                stdout=exc.partial_stdout,
+                stderr=exc.partial_stderr,
+                duration_seconds=exc.duration_seconds or remaining_timeout,
+            )
     findings_added = 0
     out_of_scope = 0
     malformed_lines = 0
@@ -174,8 +195,7 @@ def run(ctx: Any) -> dict[str, Any]:
         ):
             findings_added += 1
 
-    version = _version(executable, timeout=min(timeout, 15))
-    status = "completed" if process.returncode == 0 else ("partial" if findings_added else "error")
+    status = "completed" if process.returncode == 0 and not scan_error else ("partial" if findings_added else "error")
     result: dict[str, Any] = {
         "status": status,
         "version": version,
@@ -195,6 +215,8 @@ def run(ctx: Any) -> dict[str, Any]:
         result["rate_limit_note"] = "Nuclei integer rate limit cannot enforce delays slower than one request per second."
     if process.returncode != 0 and process.stderr.strip():
         result["error"] = " ".join(process.stderr.split())[:1000]
+    if scan_error:
+        result["error"] = scan_error[:1000]
     return result
 
 
@@ -217,7 +239,8 @@ def _version(executable: str, timeout: float) -> str | None:
     if process.returncode != 0:
         return None
     for line in (process.stdout + "\n" + process.stderr).splitlines():
-        line = line.strip()
-        if line:
-            return line[:160]
+        clean_line = _ANSI_ESCAPE.sub("", line).strip()
+        match = re.search(r"\bv?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\b", clean_line)
+        if match:
+            return match.group(0)[:80]
     return None

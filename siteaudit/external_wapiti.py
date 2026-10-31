@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -37,9 +38,22 @@ def _read_json_report(report_path: Path) -> dict[str, Any]:
 
 
 def _available_safe_modules(executable: str, timeout: float) -> list[str]:
-    result = run_command([executable, "--list-modules"], timeout=min(timeout, 15.0))
-    if result.returncode != 0:
-        raise EngineRunError("Wapiti could not list its installed attack modules")
+    result = None
+    for _attempt in range(2):
+        result = run_command(
+            [executable, "--list-modules"],
+            timeout=min(timeout, 15.0),
+            env=_wapiti_environment(),
+        )
+        if result.returncode == 0:
+            break
+        # The local, read-only query can fail transiently while the packaged
+        # Wapiti launcher initializes its Python runtime.
+    if result is None or result.returncode != 0:
+        detail = " ".join((result.stderr or result.stdout).split())[:240] if result else ""
+        suffix = f": {detail}" if detail else ""
+        code = result.returncode if result else "unknown"
+        raise EngineRunError(f"Wapiti could not list its installed attack modules (exit {code}){suffix}")
 
     available_names: set[str] = set()
     for line in f"{result.stdout}\n{result.stderr}".splitlines():
@@ -57,13 +71,24 @@ def _available_safe_modules(executable: str, timeout: float) -> list[str]:
 
 
 def _version(executable: str, timeout: float) -> str | None:
-    result = run_command([executable, "--version"], timeout=min(timeout, 10.0))
+    result = run_command(
+        [executable, "--version"],
+        timeout=min(timeout, 10.0),
+        env=_wapiti_environment(),
+    )
     if result.returncode != 0:
         return None
-    for line in result.stdout.splitlines():
-        if line.strip():
-            return line.strip()[:120]
+    for line in (result.stdout + "\n" + result.stderr).splitlines():
+        match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\b", line)
+        if match:
+            return match.group(0)[:120]
     return None
+
+
+def _wapiti_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    return environment
 
 
 def _items(section: Any):
@@ -199,6 +224,7 @@ def run(ctx: Any) -> dict[str, Any]:
             timeout=engine_timeout,
             cwd=temp_path,
             monitored_paths=[report_path, session_path],
+            env=_wapiti_environment(),
         )
         if not report_path.exists():
             raise EngineRunError(f"Wapiti exited with code {result.returncode} without a JSON report")

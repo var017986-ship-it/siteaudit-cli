@@ -189,8 +189,10 @@ def _check_csp(ctx, page_url: str, headers: dict[str, str]) -> None:
         values = directives.get(directive, fallback)
         has_nonce_or_hash = any(value.startswith(("'nonce-", "'sha256-", "'sha384-", "'sha512-")) for value in values)
         unsafe_inline = "'unsafe-inline'" in values and not has_nonce_or_hash
-        if unsafe_inline or "'unsafe-eval'" in values:
-            weak.append(f"{directive} permits unsafe inline/eval content")
+        if unsafe_inline:
+            weak.append(f"{directive} permits 'unsafe-inline'")
+        if directive == "script-src" and "'unsafe-eval'" in values:
+            weak.append("script-src permits 'unsafe-eval'")
         if "*" in values:
             weak.append(f"{directive} allows any source")
     if "*" in directives.get("default-src", []):
@@ -209,8 +211,8 @@ def _check_csp(ctx, page_url: str, headers: dict[str, str]) -> None:
         url=page_url,
         evidence="; ".join(weak[:4]) + ". This weakens CSP protection but does not prove an XSS vulnerability.",
         recommendation=(
-            "Remove unsafe-inline/unsafe-eval and broad wildcard sources where possible. "
-            "Use nonces or hashes for required inline code and restrict each directive to trusted origins."
+            "Remove 'unsafe-inline' from the affected directive where feasible; move inline styles/scripts "
+            "to trusted files or use nonces/hashes for supported inline blocks. Restrict sources to trusted origins."
         ),
         category="security-policy",
         reference=_REFERENCES["csp"],

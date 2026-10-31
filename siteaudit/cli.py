@@ -13,6 +13,7 @@ from . import __version__
 from .context import ScanContext
 from .core_checks import run as run_core
 from .external_engines import run as run_external_engines
+from .engine_status import get_engine_status
 from .models import redact_url
 from .plugins import PluginExecutionError, run_plugins
 
@@ -37,7 +38,9 @@ class ProgressReporter:
         self._external_completed = 0
         self._external_total = external_count
         self._weights = {"crawl": 0.35, "plugins": 0.65}
-        if external_count:
+        if getattr(args, "external_only", False):
+            self._weights = {"external": 1.0} if external_count else {}
+        elif external_count:
             self._weights = {"crawl": 0.25, "plugins": 0.5, "external": 0.25}
         self._starts: dict[str, float] = {}
         offset = 0.0
@@ -47,16 +50,20 @@ class ProgressReporter:
 
     def start(self) -> None:
         print(
-            "   .---------------------------------------.\n"
-            "  /              SITEAUDIT                  \\\n"
-            " |          .---------------.                |\n"
-            " |       .-'   .-------.     '-.              |\n"
-            " |      /     /  .---.  \\      \\             |\n"
-            " |     |     |  (  o  )  |      |             |\n"
-            " |      \\     \\  '---'  /      /             |\n"
-            " |       '-.   '-------'    .-'              |\n"
-            "  \\          '-------------'               /\n"
-            "   '---------------------------------------'",
+            "             .-----------------.\n"
+            "          .-'   .---------.     '-.\n"
+            "         /     /  .-----.  \\      \\ \n"
+            "        /     |  /  .-.  \\  |      \\ \n"
+            "       |      | |  ( o )  | |       |\n"
+            "       |      |  \\  ^  /  |        |\n"
+            "       |       \\  '---'  /         |\n"
+            "       |    .---'-.   .-'---.       |\n"
+            "       |   /   .---( O )---.  \\      |\n"
+            "       |   \\   '-----------' /      |\n"
+            "        \\   '-.           .-'      /\n"
+            "         '-.    '---------'      .-'\n"
+            "            '-------------------'\n"
+            "                 SITEAUDIT",
             flush=True,
         )
         if self._is_tty:
@@ -149,7 +156,7 @@ class ProgressReporter:
         bar = "#" * filled + "-" * (width - filled)
         eta_prefix = "~"
         if self._external_count and external_started_at is not None:
-            current_engine_left = max(0.0, self._external_timeout - current_engine_elapsed)
+            current_engine_left = max(1.0, self._external_timeout - current_engine_elapsed)
             eta = current_engine_left + max(0, external_total - external_completed - 1) * self._external_timeout
             eta_prefix = "≤"
         elif self._external_count and external_completed < self._external_count:
@@ -192,9 +199,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--templates-file", help="Load safe JSON or restricted Nuclei YAML templates from a local file")
     parser.add_argument("--engine", action="append", choices=("all", "nuclei", "nikto", "wapiti", "zap", "w3af"), default=[], help="Also run an installed upstream scanner; repeat or use 'all'")
     parser.add_argument("--engine-timeout", type=int, default=300, help="Scan budget per upstream engine in seconds (30-1800; ZAP baseline/active need 120/180+, default: 300)")
-    parser.add_argument("--nuclei-templates", help="Use and filter this local Nuclei template file/directory (default: ~/nuclei-templates)")
+    parser.add_argument("--nuclei-templates", help="Use and filter local Nuclei templates (default: managed engine pack, then ~/nuclei-templates)")
     parser.add_argument("--zap-active", action="store_true", help="Use ZAP full active scan instead of passive baseline; may change target behavior")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
+    parser.add_argument("--doctor", action="store_true", help="Check whether upstream scanners and their local prerequisites are ready; does not scan a target")
+    parser.add_argument("--doctor-json", action="store_true", help="Print the read-only upstream engine readiness report as JSON")
+    parser.add_argument("--external-only", action="store_true", help="Skip SiteAudit's built-in crawl and checks; run only the selected upstream engines")
     return parser
 
 
@@ -211,6 +221,12 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--engine-timeout must be between 30 and 1800 seconds")
     if args.passive and args.engine:
         parser.error("--engine cannot be used with --passive")
+    if args.external_only and not args.engine:
+        parser.error("--external-only requires at least one --engine")
+    if args.external_only and args.passive:
+        parser.error("--external-only cannot be combined with --passive")
+    if args.external_only and (args.post_probes or args.sqli_probes or args.graphql_probe or args.templates_file):
+        parser.error("--external-only cannot be combined with SiteAudit-only probes or --templates-file")
     if args.nuclei_templates and "nuclei" not in args.engine and "all" not in args.engine:
         parser.error("--nuclei-templates requires --engine nuclei")
     if args.nuclei_templates:
@@ -247,6 +263,7 @@ def run_scan(args: argparse.Namespace, progress: ProgressReporter | None = None)
         "external_engine_timeout": args.engine_timeout,
         "nuclei_templates": args.nuclei_templates,
         "zap_active": args.zap_active,
+        "external_only": args.external_only,
         "max_response_bytes": 131072,
         "max_requests": max(80, args.max_pages * 8),
         "max_cached_responses": 100,
@@ -254,23 +271,27 @@ def run_scan(args: argparse.Namespace, progress: ProgressReporter | None = None)
     }
     ctx = ScanContext(args.target, options)
 
-    if not args.passive:
+    if not args.passive and not args.external_only:
         from .template_engine import prepare as prepare_templates
         prepare_templates(ctx)
 
-    # The core discovery phase builds the bounded URL/form scope shared by the plugins.
-    if progress:
-        progress.update("prepare", 0, "Обход и сбор страниц")
-    run_core(ctx, progress=progress.crawl if progress else None)
-    if progress:
-        progress.finish_stage("crawl", f"Обход завершён: {len(ctx.discovered_urls)} страниц")
-    plugin_results, plugins_enabled = run_plugins(
-        ctx,
-        include_active=not args.passive,
-        progress=progress.plugin if progress else None,
-    )
-    if progress:
-        progress.finish_stage("plugins", "Проверки SiteAudit завершены")
+    if args.external_only:
+        plugin_results: dict[str, Any] = {}
+        plugins_enabled: list[str] = []
+    else:
+        # The core discovery phase builds the bounded URL/form scope shared by the plugins.
+        if progress:
+            progress.update("prepare", 0, "Обход и сбор страниц")
+        run_core(ctx, progress=progress.crawl if progress else None)
+        if progress:
+            progress.finish_stage("crawl", f"Обход завершён: {len(ctx.discovered_urls)} страниц")
+        plugin_results, plugins_enabled = run_plugins(
+            ctx,
+            include_active=not args.passive,
+            progress=progress.plugin if progress else None,
+        )
+        if progress:
+            progress.finish_stage("plugins", "Проверки SiteAudit завершены")
     external_results = run_external_engines(ctx, progress=progress.external if progress else None)
     if progress and "external" in progress._weights:
         progress.finish_stage("external", "Внешние сканеры завершены")
@@ -297,6 +318,20 @@ def run_scan(args: argparse.Namespace, progress: ProgressReporter | None = None)
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.doctor or args.doctor_json:
+        status = get_engine_status({"nuclei_templates": args.nuclei_templates})
+        if args.doctor_json:
+            print(json.dumps(status, indent=2, ensure_ascii=False))
+        else:
+            print("SiteAudit upstream engine readiness (read-only):")
+            for name, details in status.items():
+                state = str(details.get("status", "unknown")).upper()
+                print(f"[{state}] {name}: {details.get('summary', '')}")
+                if state != "READY":
+                    print(f"         Next: {details.get('next_step', '')}")
+            ready_count = sum(details.get("status") == "ready" for details in status.values())
+            print(f"Ready: {ready_count}/{len(status)} upstream engines")
+        return 0 if all(details.get("status") == "ready" for details in status.values()) else 1
     if not args.target:
         args.target = os.environ.get("SITEAUDIT_TARGET")
     if not args.target:

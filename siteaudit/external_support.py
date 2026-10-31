@@ -10,7 +10,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 
@@ -24,6 +24,19 @@ class EngineUnavailable(RuntimeError):
 class EngineRunError(RuntimeError):
     """Raised when an upstream scanner fails or exceeds local limits."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_stdout: str = "",
+        partial_stderr: str = "",
+        duration_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.partial_stdout = partial_stdout
+        self.partial_stderr = partial_stderr
+        self.duration_seconds = duration_seconds
+
 
 @dataclass(frozen=True, slots=True)
 class ProcessOutput:
@@ -34,12 +47,47 @@ class ProcessOutput:
 
 
 def find_executable(*names: str) -> str:
+    engine_home = get_engine_home()
+    search_roots = (
+        engine_home,
+        engine_home / "bin",
+        engine_home / "nuclei",
+        engine_home / "nikto" / "program",
+        engine_home / "wapiti" / "Scripts",
+        engine_home / "wapiti" / "bin",
+        engine_home / "perl" / "perl" / "bin",
+    )
+    suffixes = ("", ".exe", ".bat", ".cmd") if os.name == "nt" else ("",)
+    for name in names:
+        for root in search_roots:
+            for suffix in suffixes:
+                candidate = root / f"{name}{suffix}"
+                try:
+                    if candidate.is_file():
+                        return str(candidate)
+                except OSError:
+                    continue
     for name in names:
         resolved = shutil.which(name)
         if resolved:
             return resolved
     shown = ", ".join(names)
-    raise EngineUnavailable(f"Required executable not found in PATH (tried: {shown})")
+    raise EngineUnavailable(
+        f"Required executable not found in PATH or the managed engine directory "
+        f"{engine_home} (tried: {shown})"
+    )
+
+
+def get_engine_home() -> Path:
+    """Return the per-user directory reserved for explicitly installed engines."""
+    configured = os.environ.get("SITEAUDIT_ENGINE_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        return Path(base) / "SiteAudit" / "engines" if base else Path.home() / "AppData" / "Local" / "SiteAudit" / "engines"
+    data_home = os.environ.get("XDG_DATA_HOME")
+    return (Path(data_home) if data_home else Path.home() / ".local" / "share") / "siteaudit" / "engines"
 
 
 def run_command(
@@ -49,6 +97,7 @@ def run_command(
     cwd: str | Path | None = None,
     output_limit: int = MAX_ENGINE_OUTPUT_BYTES,
     monitored_paths: Sequence[str | Path] = (),
+    env: Mapping[str, str] | None = None,
 ) -> ProcessOutput:
     """Run one known scanner command without a shell and cap its captured output."""
     if not command or any(not isinstance(part, str) or "\x00" in part for part in command):
@@ -69,6 +118,7 @@ def run_command(
                     stdout=stdout_file,
                     stderr=stderr_file,
                     cwd=str(cwd) if cwd is not None else None,
+                    env=dict(env) if env is not None else None,
                     shell=False,
                     close_fds=True,
                     creationflags=creation_flags,
@@ -81,17 +131,32 @@ def run_command(
                     if output_size > output_limit:
                         process.kill()
                         process.wait()
-                        raise EngineRunError(f"External scanner output exceeded {output_limit} bytes")
+                        raise EngineRunError(
+                            f"External scanner output exceeded {output_limit} bytes",
+                            partial_stdout=_capture_output(stdout_path, output_limit),
+                            partial_stderr=_capture_output(stderr_path, output_limit),
+                            duration_seconds=round(time.monotonic() - started, 3),
+                        )
                     if elapsed > timeout:
                         process.kill()
                         process.wait()
-                        raise EngineRunError(f"External scanner exceeded the {timeout:g}-second time limit")
+                        raise EngineRunError(
+                            f"External scanner exceeded the {timeout:g}-second time limit",
+                            partial_stdout=_capture_output(stdout_path, output_limit),
+                            partial_stderr=_capture_output(stderr_path, output_limit),
+                            duration_seconds=round(time.monotonic() - started, 3),
+                        )
                     time.sleep(0.05)
                 output_size = stdout_path.stat().st_size + stderr_path.stat().st_size
                 for monitored_path in monitored_paths:
                     output_size += _path_size(Path(monitored_path))
                 if output_size > output_limit:
-                    raise EngineRunError(f"External scanner output exceeded {output_limit} bytes")
+                    raise EngineRunError(
+                        f"External scanner output exceeded {output_limit} bytes",
+                        partial_stdout=_capture_output(stdout_path, output_limit),
+                        partial_stderr=_capture_output(stderr_path, output_limit),
+                        duration_seconds=round(time.monotonic() - started, 3),
+                    )
             stdout = stdout_path.read_bytes().decode("utf-8", errors="replace")
             stderr = stderr_path.read_bytes().decode("utf-8", errors="replace")
         except FileNotFoundError as exc:
@@ -105,6 +170,13 @@ def run_command(
         stderr=stderr,
         duration_seconds=round(time.monotonic() - started, 3),
     )
+
+
+def _capture_output(path: Path, byte_limit: int) -> str:
+    try:
+        return path.read_bytes()[:byte_limit].decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def scoped_url(ctx: Any, value: Any) -> str | None:

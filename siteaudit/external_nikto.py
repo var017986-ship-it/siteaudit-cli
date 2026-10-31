@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
 from .external_support import (
     EngineRunError,
+    EngineUnavailable,
     add_engine_finding,
     find_executable,
     run_command,
@@ -22,31 +24,51 @@ from .external_support import (
 # test injection, file retrieval, DoS, command execution, uploads, and auth bypass
 # stay excluded from this default adapter run.
 _SAFE_TUNING = "123b"
+_DOCKER_IMAGE = "ghcr.io/sullo/nikto:2.6.1"
 
 
 def run(ctx: Any) -> dict[str, Any]:
-    executable = find_executable("nikto", "nikto.pl")
-    launcher = [executable]
-    if Path(executable).suffix.lower() == ".pl":
-        launcher = [find_executable("perl"), executable]
+    options = getattr(ctx, "options", {}) or {}
+    docker_mode = False
+    try:
+        executable = find_executable("nikto", "nikto.pl")
+        launcher = [executable]
+        if Path(executable).suffix.lower() == ".pl":
+            launcher = [find_executable("perl"), executable]
+    except EngineUnavailable:
+        docker = find_executable("docker", "docker.exe")
+        image_check = run_command(
+            [docker, "image", "inspect", _DOCKER_IMAGE, "--format", "{{.Id}}"],
+            timeout=8,
+            output_limit=4096,
+        )
+        if image_check.returncode != 0:
+            raise EngineUnavailable(
+                f"Nikto is not installed and its Docker image is missing; run `docker pull {_DOCKER_IMAGE}`"
+            )
+        docker_mode = True
+        launcher = [docker]
+        executable = _DOCKER_IMAGE
     target = str(ctx.base_url)
     # Confirm the exact supplied origin before invoking a tool that resolves it
     # independently of SiteAudit's pinned HTTP client.
     if scoped_url(ctx, target) is None:
         raise EngineRunError("Nikto target failed the selected host-and-port scope check")
 
-    options = getattr(ctx, "options", {}) or {}
     engine_timeout = max(1, int(options.get("external_engine_timeout", 300)))
     request_timeout = max(1, int(options.get("timeout", 10)))
     pause = max(0.1, float(options.get("delay", 0.5)))
-    proxy_url = options.get("external_proxy_url")
+    proxy_url = options.get("external_proxy_auth_url" if docker_mode else "external_proxy_url")
     if not isinstance(proxy_url, str) or not proxy_url:
         raise EngineRunError("Nikto requires the SiteAudit scope proxy")
+    if docker_mode and not proxy_url.startswith("http://siteaudit:"):
+        raise EngineRunError("Nikto Docker mode requires the authenticated remote scope proxy")
 
     with tempfile.TemporaryDirectory(prefix="siteaudit-nikto-") as directory:
         report_path = Path(directory) / "nikto.json"
-        command = [
-            *launcher,
+        container_name = f"siteaudit-nikto-{uuid.uuid4().hex[:16]}" if docker_mode else None
+        output_path = "/tmp/siteaudit/nikto.json" if docker_mode else str(report_path)
+        scan_arguments = [
             "-host", target,
             "-nointeractive",
             "-nocheck",
@@ -58,14 +80,33 @@ def run(ctx: Any) -> dict[str, Any]:
             "-timeout", str(request_timeout),
             "-maxtime", f"{engine_timeout}s",
             "-Format", "json",
-            "-output", str(report_path),
+            "-output", output_path,
         ]
-        process = run_command(
-            command,
-            timeout=engine_timeout + min(30, request_timeout),
-            cwd=directory,
-            monitored_paths=[report_path],
-        )
+        if docker_mode:
+            command = [
+                *launcher,
+                "run",
+                "--rm",
+                "--pull=never",
+                "--name", container_name,
+                "--add-host", "host.docker.internal:host-gateway",
+                "--mount", f"type=bind,source={directory},target=/tmp/siteaudit",
+                _DOCKER_IMAGE,
+                *scan_arguments,
+            ]
+        else:
+            command = [*launcher, *scan_arguments]
+        cleanup_error = None
+        try:
+            process = run_command(
+                command,
+                timeout=engine_timeout + min(30, request_timeout),
+                cwd=directory,
+                monitored_paths=[report_path],
+            )
+        finally:
+            if container_name:
+                cleanup_error = _cleanup_docker_container(docker, container_name, directory)
         if not report_path.is_file():
             detail = _brief_stderr(process.stderr)
             raise EngineRunError(f"Nikto did not produce its JSON report{': ' + detail if detail else ''}")
@@ -120,7 +161,7 @@ def run(ctx: Any) -> dict[str, Any]:
             ):
                 findings += 1
 
-    status = "completed" if process.returncode == 0 else "partial"
+    status = "completed" if process.returncode == 0 and not cleanup_error else "partial"
     result: dict[str, Any] = {
         "status": status,
         "return_code": process.returncode,
@@ -128,6 +169,9 @@ def run(ctx: Any) -> dict[str, Any]:
         "findings_parsed": findings,
         "tuning": _SAFE_TUNING,
         "max_scan_time_seconds": engine_timeout,
+        "execution": "docker" if docker_mode else "native",
+        "docker_image": _DOCKER_IMAGE if docker_mode else None,
+        "container_cleanup": "failed" if cleanup_error else ("complete" if docker_mode else None),
         "pause_seconds": pause,
         "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP; HTTPS Host headers inside TLS are not inspected.",
     }
@@ -135,7 +179,23 @@ def run(ctx: Any) -> dict[str, Any]:
         detail = _brief_stderr(process.stderr)
         if detail:
             result["error"] = detail
+    if cleanup_error:
+        result["error"] = (result.get("error", "") + f" Docker cleanup failed: {cleanup_error}").strip()[:800]
     return result
+
+
+def _cleanup_docker_container(docker: str, name: str, cwd: str) -> str | None:
+    errors = []
+    for action in ("stop", "rm"):
+        command = [docker, action, "--time", "2", name] if action == "stop" else [docker, action, "--force", name]
+        try:
+            result = run_command(command, timeout=8, cwd=cwd, output_limit=4096)
+            detail = result.stderr or result.stdout
+            if result.returncode != 0 and "no such container" not in detail.lower():
+                errors.append(_brief_stderr(detail) or f"docker {action} failed")
+        except (EngineRunError, EngineUnavailable, OSError) as exc:
+            errors.append(str(exc))
+    return "; ".join(errors)[:500] if errors else None
 
 
 def _brief_stderr(value: str) -> str:

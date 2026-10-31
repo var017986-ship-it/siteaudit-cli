@@ -118,7 +118,8 @@ def _script(
         "set only_forward False",
         f"set follow_regex {origin_filter}",
         "back",
-        "audit xss, sqli, ssl_certificate",
+        # This upstream plugin opens a raw socket and bypasses the configured proxy.
+        "audit xss, sqli",
         "audit config xss",
         "set persistent_xss False",
         "back",
@@ -277,7 +278,7 @@ def run(ctx: Any) -> dict[str, Any]:
         "exit_code": result.returncode,
         "duration_seconds": result.duration_seconds,
         "findings_imported": imported,
-        "plugins": ["web_spider", "xss", "sqli", "ssl_certificate", "selected passive grep plugins"],
+        "plugins": ["web_spider", "xss", "sqli", "selected passive grep plugins"],
         "scope": "discovered links are filtered to the exact target origin and configured path depth; imported findings are scope-checked",
         "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP; HTTPS Host headers inside TLS are not inspected. Smart-filled forms may submit data.",
         "max_depth": max_depth,
@@ -291,6 +292,7 @@ def run(ctx: Any) -> dict[str, Any]:
         "limitations": [
             "W3AF does not expose a hard max-pages option; discovery time and path depth are bounded instead.",
             "The W3AF crawler smart-fills discovered forms, so form submissions can change application state; use only on a staging target prepared for testing.",
+            "The ssl_certificate plugin is disabled because it opens a direct socket outside the configured scope proxy.",
             "HTTPS Host headers are encrypted inside CONNECT tunnels and cannot be checked by the scope proxy.",
             "The upstream project is legacy and is not supported on Windows.",
         ],
