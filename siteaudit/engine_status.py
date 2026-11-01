@@ -19,7 +19,7 @@ _TEMPLATE_EXTENSIONS = {".yaml", ".yml", ".json"}
 _MAX_TEMPLATE_ENTRIES = 100_000
 _PROBE_TIMEOUT_SECONDS = 5.0
 _PROBE_OUTPUT_BYTES = 4096
-_WAPITI_SAFE_MODULES = {"cookieflags", "csp", "http_header", "http_headers", "nikto", "sql", "crlf"}
+_WAPITI_SAFE_MODULES = {"cookieflags", "csp", "http_header", "http_headers", "sql", "crlf"}
 
 
 def get_engine_status(options: Mapping[str, Any] | None = None) -> dict[str, dict[str, Any]]:
@@ -238,6 +238,7 @@ def _wapiti_status() -> dict[str, Any]:
     modules = _probe(
         [executable, "--list-modules"],
         output_limit=32_000,
+        timeout=15.0,
         env=wapiti_environment,
     )
     if modules["status"] != "ready":
@@ -253,7 +254,7 @@ def _wapiti_status() -> dict[str, Any]:
         return _status(
             "missing",
             "Wapiti is on PATH, but none of SiteAudit's supported low-impact modules are installed.",
-            "Install a complete Wapiti distribution with cookie/header, SQL, and CRLF modules.",
+            "Install Wapiti with at least one supported low-impact cookie, header, SQL, or CRLF module.",
             executable=executable,
         )
     return _status(
@@ -352,13 +353,14 @@ def _probe(
     command: list[str],
     *,
     output_limit: int = _PROBE_OUTPUT_BYTES,
+    timeout: float = _PROBE_TIMEOUT_SECONDS,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Run a local read-only prerequisite query with strict time/output caps."""
     try:
         result = run_command(
             command,
-            timeout=_PROBE_TIMEOUT_SECONDS,
+            timeout=timeout,
             output_limit=output_limit,
             env=env,
         )

@@ -188,8 +188,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="siteaudit", description="Bounded HTTP security checks for authorized web targets.")
     parser.add_argument("target", nargs="?", help="Target URL or domain (for example, https://example.com)")
     parser.add_argument("--output", "-o", default="siteaudit-report.json", help="JSON report path (default: siteaudit-report.json)")
-    parser.add_argument("--max-pages", type=int, default=50, help="Maximum HTML pages to crawl (1-500, default: 50)")
-    parser.add_argument("--max-depth", type=int, default=2, help="Maximum crawl depth (0-8, default: 2)")
+    parser.add_argument("--max-pages", type=int, default=50, help="Built-in crawl page cap and per-engine tuning input (1-500, default: 50)")
+    parser.add_argument("--max-depth", type=int, default=2, help="Built-in crawl depth and per-engine tuning input (0-8, default: 2)")
     parser.add_argument("--delay", type=float, default=0.5, help="Delay for built-in requests; upstream engines apply it where supported (0.1-10, default: 0.5)")
     parser.add_argument("--timeout", type=float, default=10, help="HTTP timeout in seconds (1-60, default: 10)")
     parser.add_argument("--passive", action="store_true", help="Skip active templates and probes; crawl and inspect fetched responses only")
@@ -200,6 +200,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", action="append", choices=("all", "nuclei", "nikto", "wapiti", "zap", "w3af"), default=[], help="Also run an installed upstream scanner; repeat or use 'all'")
     parser.add_argument("--engine-timeout", type=int, default=300, help="Scan budget per upstream engine in seconds (30-1800; ZAP baseline/active need 120/180+, default: 300)")
     parser.add_argument("--nuclei-templates", help="Use and filter local Nuclei templates (default: managed engine pack, then ~/nuclei-templates)")
+    parser.add_argument("--nuclei-auto-scan", action="store_true", help="Let Nuclei select a narrower template set from detected web technologies")
     parser.add_argument("--zap-active", action="store_true", help="Use ZAP full active scan instead of passive baseline; may change target behavior")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
     parser.add_argument("--doctor", action="store_true", help="Check whether upstream scanners and their local prerequisites are ready; does not scan a target")
@@ -229,6 +230,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--external-only cannot be combined with SiteAudit-only probes or --templates-file")
     if args.nuclei_templates and "nuclei" not in args.engine and "all" not in args.engine:
         parser.error("--nuclei-templates requires --engine nuclei")
+    if args.nuclei_auto_scan and "nuclei" not in args.engine and "all" not in args.engine:
+        parser.error("--nuclei-auto-scan requires --engine nuclei")
     if args.nuclei_templates:
         nuclei_templates = Path(args.nuclei_templates).expanduser()
         if not nuclei_templates.exists() or not (nuclei_templates.is_file() or nuclei_templates.is_dir()):
@@ -262,6 +265,7 @@ def run_scan(args: argparse.Namespace, progress: ProgressReporter | None = None)
         "external_engines": args.engine,
         "external_engine_timeout": args.engine_timeout,
         "nuclei_templates": args.nuclei_templates,
+        "nuclei_auto_scan": args.nuclei_auto_scan,
         "zap_active": args.zap_active,
         "external_only": args.external_only,
         "max_response_bytes": 131072,
@@ -303,14 +307,43 @@ def run_scan(args: argparse.Namespace, progress: ProgressReporter | None = None)
     finished = datetime.now(timezone.utc)
     findings = sorted(ctx.findings, key=lambda item: ("critical high medium low info".split().index(item.severity.lower()) if item.severity.lower() in "critical high medium low info".split() else 5, item.id, item.url))
     counts = {level: sum(1 for item in findings if item.severity.lower() == level) for level in ("critical", "high", "medium", "low", "info")}
+    partial_reasons: list[str] = []
+    if ctx.request_limit_reached:
+        partial_reasons.append("built_in_request_limit_reached")
+    for plugin_name, plugin_result in plugin_results.items():
+        if plugin_name == "external_engines" and isinstance(plugin_result, dict):
+            for engine_name, engine_result in plugin_result.items():
+                if isinstance(engine_result, dict) and engine_result.get("status") in {"partial", "error", "unavailable"}:
+                    partial_reasons.append(f"external_engine_{engine_name}_{engine_result['status']}")
+        elif isinstance(plugin_result, dict) and plugin_result.get("status") == "partial":
+            partial_reasons.append(f"plugin_{plugin_name}_partial")
+    scan_status = "partial" if partial_reasons else "completed"
     return {
         "tool": {"name": "SiteAudit", "version": __version__},
+        "status": scan_status,
         "target": redact_url(ctx.base_url),
         "started_at": started.isoformat(),
         "completed_at": finished.isoformat(),
         "duration_seconds": round(time.monotonic() - started_monotonic, 3),
-        "settings": {**{key: value for key, value in options.items() if key not in {"templates_file", "nuclei_templates"}}, "custom_templates_enabled": bool(args.templates_file)},
-        "summary": {"findings": len(findings), "severity_counts": counts, "pages_visited": len(ctx.discovered_urls), "requests_sent": ctx.request_count, "responses_cached": len(ctx.discovered_responses), "response_cache_limited": ctx.response_cache_limited, "plugin_results": plugin_results},
+        "settings": {
+            **{key: value for key, value in options.items() if key not in {"templates_file", "nuclei_templates"}},
+            "built_in_crawl_limits": {"max_pages": args.max_pages, "max_depth": args.max_depth},
+            "external_page_limits_are_engine_specific": True,
+            "custom_templates_enabled": bool(args.templates_file),
+        },
+        "summary": {
+            "status": scan_status,
+            "partial_reasons": partial_reasons,
+            "findings": len(findings),
+            "severity_counts": counts,
+            "pages_visited": len(ctx.discovered_urls),
+            "requests_sent": ctx.request_count,
+            "request_limit_reached": ctx.request_limit_reached,
+            "request_limit_blocked_attempts": ctx.request_limit_blocked_attempts,
+            "responses_cached": len(ctx.discovered_responses),
+            "response_cache_limited": ctx.response_cache_limited,
+            "plugin_results": plugin_results,
+        },
         "findings": [item.to_dict() for item in findings],
     }
 
@@ -352,6 +385,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if progress:
         progress.finish(True)
-    print(f"Scanned {report['target']}: {report['summary']['findings']} findings, {report['summary']['pages_visited']} pages")
+    print(f"Scan {report['status']}: {report['target']} — {report['summary']['findings']} findings, {report['summary']['pages_visited']} built-in pages")
     print(f"JSON report: {output.resolve()}")
-    return 0
+    return 1 if report["status"] == "partial" else 0

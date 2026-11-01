@@ -36,9 +36,9 @@ echo                        \   .-.   /
 echo                         \ ( O ) /
 echo                          '-------'
 echo.
-echo   1. Quick passive scan     ^(10 pages, no active probes^)
+echo   1. Quick passive scan     ^(10 built-in pages, no active probes^)
 echo   2. Standard scan          ^(built-in checks, 50 pages^)
-echo   3. Deep SiteAudit scan    ^(up to 200 pages, SQLi/GraphQL^)
+echo   3. Deep SiteAudit scan    ^(up to 200 built-in pages, SQLi/GraphQL^)
 echo   4. Full combined scan    ^(SiteAudit + active ZAP, if installed^)
 echo   5. Upstream engines only ^(ZAP active, if installed^)
 echo   6. Check engine readiness

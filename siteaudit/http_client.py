@@ -114,6 +114,8 @@ class ScanContext:
         self._cached_response_bytes = 0
         self.response_cache_limited = False
         self._request_count = 0
+        self._request_limit_reached = False
+        self._request_limit_blocked_attempts = 0
         self._last_request_at = 0.0
         self._lock = threading.Lock()
         self._validate_host(self.base_url)
@@ -165,7 +167,15 @@ class ScanContext:
 
         expected_parts = urlsplit(self.base_url)
         expected_port = expected_parts.port or (443 if expected_parts.scheme == "https" else 80)
-        if hostname != self.hostname or port != expected_port:
+        same_origin = hostname == self.hostname and port == expected_port and scheme == expected_parts.scheme
+        same_host_https_upgrade = (
+            hostname == self.hostname
+            and expected_parts.scheme == "http"
+            and expected_port == 80
+            and scheme == "https"
+            and port == 443
+        )
+        if not (same_origin or same_host_https_upgrade):
             raise ValueError("Request is outside the selected host and port scope")
         if expected_parts.scheme == "https" and scheme != "https":
             raise ValueError("HTTPS to HTTP downgrade is blocked")
@@ -315,6 +325,8 @@ class ScanContext:
                 with self._lock:
                     cap = int(self.options.get("max_requests", 400))
                     if self._request_count >= cap:
+                        self._request_limit_reached = True
+                        self._request_limit_blocked_attempts += 1
                         return ScanResponse(url=target, error=f"Request limit reached ({cap})")
                     self._request_count += 1
                     wait_for = float(self.options.get("delay", 0.5)) - (time.monotonic() - self._last_request_at)
@@ -396,3 +408,11 @@ class ScanContext:
     @property
     def request_count(self) -> int:
         return self._request_count
+
+    @property
+    def request_limit_reached(self) -> bool:
+        return self._request_limit_reached
+
+    @property
+    def request_limit_blocked_attempts(self) -> int:
+        return self._request_limit_blocked_attempts

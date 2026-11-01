@@ -6,6 +6,7 @@ from importlib import import_module
 import ipaddress
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 from .external_support import EngineRunError, EngineUnavailable, find_executable, run_command
@@ -76,6 +77,7 @@ def run(ctx: Any, progress=None) -> dict[str, dict[str, Any]]:
             )
         }
         scope_proxy = None
+        engine_started = time.monotonic()
         try:
             adapter = import_module(f".{module_name}", package=__package__)
             remote_proxy = name == "zap" or (name == "nikto" and not _nikto_native_ready())
@@ -93,6 +95,7 @@ def run(ctx: Any, progress=None) -> dict[str, dict[str, Any]]:
                     "bind_address": zap_wsl_runtime["host_gateway"],
                     "proxy_host": zap_wsl_runtime["host_gateway"],
                     "allowed_remote_clients": (f"{zap_wsl_runtime['client_ip']}/32",),
+                    "remote_auth_required": False,
                 }
             elif remote_proxy and not proxy_options:
                 proxy_options["allowed_remote_clients"] = _docker_bridge_allowlist()
@@ -132,12 +135,17 @@ def run(ctx: Any, progress=None) -> dict[str, dict[str, Any]]:
                     options.pop(key, None)
                 else:
                     options[key] = value
+        result.setdefault("engine_elapsed_seconds", round(time.monotonic() - engine_started, 3))
         if scope_proxy is not None:
             proxy_stats = scope_proxy.stats()
             result["scope_proxy"] = proxy_stats
+            result["proxy_transactions_authorized"] = (
+                proxy_stats["http_requests_authorized"] + proxy_stats["https_tunnels_authorized"]
+            )
             result["scope_enforcement"] = (
                 "HTTP requests and HTTPS CONNECT tunnels are limited to the selected host and port; "
-                "the proxy connects to the pinned IP and checks HTTPS SNI. HTTPS Host headers, methods, and bodies inside TLS are not inspected."
+                "the proxy connects to the pinned IP and checks HTTPS SNI. A same-host HTTP-to-HTTPS upgrade from port 80 to 443 is allowed when the scan starts with HTTP. "
+                "HTTPS Host headers, methods, and bodies inside TLS are not inspected."
             )
             if (
                 proxy_stats["request_limit_reached"]

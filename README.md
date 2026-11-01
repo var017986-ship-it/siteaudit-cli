@@ -61,6 +61,8 @@ Use `siteaudit --help` to see available scope, rate, crawl, and passive-mode opt
 
 ## Optional upstream engines
 
+The top-level report `status` is `partial` if the built-in request budget is exhausted or an external engine times out, errors, is blocked by scope controls, or is unavailable. SiteAudit still saves the JSON report and exits with code 1. Built-in `--max-pages`, `--max-depth`, and request budget apply to SiteAudit checks; upstream engines use their own settings. ZAP limits depth and children per page, while Wapiti limits depth, links per page, files per directory, and runtime; neither exposes a hard total-page cap. Each engine records its effective limits and proxy counters under `summary.plugin_results.external_engines`. External-only reports can have zero built-in page/request counts even when an upstream scanner ran.
+
 SiteAudit can invoke Nuclei, Nikto, Wapiti, OWASP ZAP, and W3AF engines and merge their findings into its JSON report. Nuclei and Wapiti can be stored in the current user's managed engine directory; Nikto can run from pinned Debian WSL, native Perl, or Docker; ZAP uses pinned Debian WSL or Docker. Their upstream source code and signature databases are not copied into this repository. Run one or more with repeated `--engine` flags, or use `--engine all`:
 
 ```powershell

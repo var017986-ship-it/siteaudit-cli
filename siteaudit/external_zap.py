@@ -284,6 +284,7 @@ def _run_wsl(
         timed_out = scan_process.returncode in {124, 137}
         status = "partial" if timed_out or cleanup_error or scan_process.returncode != 0 else "completed"
         result = _result(
+            ctx=ctx,
             findings=findings,
             process=scan_process,
             mode="active" if active else "passive",
@@ -404,6 +405,7 @@ def _run_docker(
         findings = _collect_findings(ctx, target, report)
         status = "completed" if process.returncode == 0 and not cleanup_error else "partial"
         result = _result(
+            ctx=ctx,
             findings=findings,
             process=process,
             mode="active" if active else "passive",
@@ -445,11 +447,17 @@ def _automation_plan(
     origin += "/"
     escaped_authority_host = re.escape(origin_host)
     port_pattern = f"(?::{port})?" if port == default_port else f":{port}"
-    origin_pattern = f"^{re.escape(scheme)}://{escaped_authority_host}{port_pattern}/.*$"
+    origin_patterns = [f"{re.escape(scheme)}://{escaped_authority_host}{port_pattern}"]
+    if scheme == "http" and port == 80:
+        origin_patterns.append(f"https://{escaped_authority_host}(?::443)?")
+    origin_pattern = f"^(?:{'|'.join(origin_patterns)})/.*$"
     spider_authority = origin_host if port == default_port else f"{origin_host}:{port}"
     spider_url = urlunsplit((scheme, spider_authority, parts.path or "/", parts.query, ""))
     spider_minutes = max(1, min(3, engine_timeout // 60))
-    max_depth = max(1, min(5, int(getattr(ctx, "options", {}).get("max_depth", 5))))
+    requested_depth = min(8, max(0, int(getattr(ctx, "options", {}).get("max_depth", 5))))
+    # ZAP interprets maxDepth=0 as unlimited, so a zero-depth SiteAudit run
+    # omits the spider job and keeps the root as the only possible target.
+    max_depth = max(1, requested_depth)
     max_children = max(1, min(10, max_pages))
     delay_ms = max(500, min(10_000, int(max(0.5, float(delay)) * 1000)))
     environment = {
@@ -472,20 +480,29 @@ def _automation_plan(
             "username": proxy_username,
             "password": proxy_password,
         })
-    jobs: list[dict[str, Any]] = [{
-        "type": "spider",
-        "parameters": {
-            "context": "siteaudit-selected-origin",
-            "url": spider_url,
-            "maxDuration": spider_minutes,
-            "maxDepth": max_depth,
-            "maxChildren": max_children,
-            "maxParseSizeBytes": 2_000_000,
-            "postForm": False,
-            "processForm": False,
-            "threadCount": 1,
-        },
-    }, {"type": "passiveScan-wait", "parameters": {"maxDuration": max(1, min(5, engine_timeout // 60))}}]
+    jobs: list[dict[str, Any]] = []
+    if requested_depth > 0:
+        jobs.append({
+            "type": "spider",
+            "parameters": {
+                "context": "siteaudit-selected-origin",
+                "url": spider_url,
+                "maxDuration": spider_minutes,
+                "maxDepth": max_depth,
+                "maxChildren": max_children,
+                "maxParseSizeBytes": 2_000_000,
+                "postForm": False,
+                "processForm": False,
+                "threadCount": 1,
+            },
+        })
+    else:
+        jobs.append({
+            "type": "requestor",
+            "parameters": {},
+            "requests": [{"url": spider_url, "method": "GET", "name": "SiteAudit root-only request"}],
+        })
+    jobs.append({"type": "passiveScan-wait", "parameters": {"maxDuration": max(1, min(5, engine_timeout // 60))}})
     if active:
         jobs.append({
             "type": "activeScan",
@@ -646,6 +663,7 @@ def _collect_findings(ctx: Any, target: str, report: dict[str, Any]) -> int:
 
 def _result(
     *,
+    ctx: Any,
     findings: int,
     process: Any,
     mode: str,
@@ -661,6 +679,9 @@ def _result(
         "mode": mode,
         "execution": execution,
         "max_pages_per_parent": max(1, min(10, max_pages)),
+        "max_depth_requested": min(8, max(0, int(getattr(ctx, "options", {}).get("max_depth", 5)))),
+        "max_depth_effective": min(8, max(0, int(getattr(ctx, "options", {}).get("max_depth", 5)))),
+        "global_page_cap_enforced": False,
         "max_scan_time_seconds": engine_timeout,
         "scanner_threads_per_host": 1,
         "request_response_content_in_report": False,

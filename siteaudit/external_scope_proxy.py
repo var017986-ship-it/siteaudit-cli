@@ -67,6 +67,7 @@ class ScopeProxy:
             raise ScopeProxyError(f"Could not pin the selected target: {exc}") from exc
         if self.scheme not in {"http", "https"} or not 1 <= self.port <= 65535:
             raise ScopeProxyError("Target must use a valid HTTP or HTTPS origin")
+        self.allow_https_upgrade = self.scheme == "http" and self.port == 80
         self.request_limit = max(1, int(request_limit))
         self.delay = max(0.0, float(delay))
         self.timeout = min(max(float(timeout), 1.0), 60.0)
@@ -116,6 +117,8 @@ class ScopeProxy:
             "proxy_auth_headers_received": 0,
             "proxy_auth_failures": 0,
             "out_of_scope_attempts_blocked": 0,
+            "scope_block_reasons": {},
+            "blocked_authorities": [],
             "unsupported_methods_blocked": 0,
             "proxy_client_limit_rejections": 0,
             "proxy_nonlocal_client_rejections": 0,
@@ -198,8 +201,7 @@ class ScopeProxy:
         try:
             self._validate_url(url)
         except (TypeError, ValueError, UnicodeError):
-            with self._lock:
-                self._stats["out_of_scope_attempts_blocked"] += 1
+            self._record_scope_block("out_of_scope_request", url)
             return False
 
         with self._lock:
@@ -219,17 +221,37 @@ class ScopeProxy:
 
     def _validate_url(self, url: str) -> None:
         parts = urlsplit(url)
-        if parts.scheme.lower() != self.scheme or parts.username or parts.password:
+        scheme = parts.scheme.lower()
+        if scheme not in {"http", "https"} or parts.username or parts.password:
             raise ValueError("Request scheme or credentials are not allowed")
-        request_port = parts.port if parts.port is not None else (443 if self.scheme == "https" else 80)
-        self._check_origin(parts.hostname, request_port)
+        request_port = parts.port if parts.port is not None else (443 if scheme == "https" else 80)
+        self._check_origin(parts.hostname, request_port, scheme=scheme)
 
-    def _check_origin(self, hostname: str | None, port: int) -> None:
+    def _check_origin(self, hostname: str | None, port: int, *, scheme: str | None = None) -> None:
         if not hostname:
             raise ValueError("Missing request host")
         normalized = _normalize_host(hostname)
-        if normalized != self.hostname or port != self.port:
+        request_scheme = scheme or self.scheme
+        same_origin = normalized == self.hostname and port == self.port and request_scheme == self.scheme
+        same_host_upgrade = (
+            normalized == self.hostname
+            and self.allow_https_upgrade
+            and request_scheme == "https"
+            and port == 443
+        )
+        if not (same_origin or same_host_upgrade):
             raise ValueError("Request is outside the selected host and port")
+
+    def _record_scope_block(self, reason: str, authority: str | None = None) -> None:
+        """Count a blocked request and retain a small, path-free authority sample."""
+        normalized_authority = _safe_authority(authority)
+        with self._lock:
+            self._stats["out_of_scope_attempts_blocked"] += 1
+            reasons = self._stats["scope_block_reasons"]
+            reasons[reason] = reasons.get(reason, 0) + 1
+            samples = self._stats["blocked_authorities"]
+            if normalized_authority and normalized_authority not in samples and len(samples) < 10:
+                samples.append(normalized_authority)
 
     def _matches_auth(self, value: str | None) -> bool:
         if not self.remote_access or not self.remote_auth_required:
@@ -252,13 +274,16 @@ class ScopeProxy:
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
-            return {
+            snapshot = {
                 **self._stats,
+                "scope_block_reasons": dict(self._stats["scope_block_reasons"]),
+                "blocked_authorities": list(self._stats["blocked_authorities"]),
                 "remote_auth_required": self.remote_auth_required,
                 "proxy_transaction_limit": self.request_limit,
                 "proxy_transaction_limit_unit": "HTTP request or HTTPS CONNECT tunnel; HTTPS requests inside tunnels are not counted",
                 "pinned_address": self.pinned_ip,
                 "selected_origin": f"{self.scheme}://{self.hostname}:{self.port}",
+                "allowed_same_host_https_upgrade": self.allow_https_upgrade,
                 "https_request_counting": "per CONNECT tunnel; HTTPS requests remain encrypted",
                 "https_host_header_validation": (
                     "not inspected inside the encrypted tunnel; TLS SNI is checked, but a client can send a different HTTP Host header"
@@ -267,6 +292,7 @@ class ScopeProxy:
                     "Host/:authority, HTTP methods, and request bodies inside TLS are not inspected"
                 ),
             }
+            return snapshot
 
 
 class _ScopeHTTPServer(ThreadingHTTPServer):
@@ -376,21 +402,23 @@ class _ScopeProxyHandler(BaseHTTPRequestHandler):
             scope._reserve_auth_failure()
             self._deny(407, "Proxy authentication required", proxy_auth=True)
             return
+        authority_text = self.path
         try:
             authority = urlsplit(f"//{self.path}")
             if authority.username or authority.password or not authority.hostname:
                 raise ValueError("Invalid CONNECT authority")
             connect_port = authority.port if authority.port is not None else 443
-            scope._check_origin(authority.hostname, connect_port)
-            if scope.scheme != "https" or connect_port != scope.port:
-                raise ValueError("HTTPS tunnel is outside the selected origin")
         except (TypeError, ValueError, UnicodeError):
-            with scope._lock:
-                scope._stats["out_of_scope_attempts_blocked"] += 1
+            scope._record_scope_block("invalid_connect_authority", authority_text)
+            self._deny(403, "Target is outside the selected scan scope")
+            return
+        try:
+            scope._check_origin(authority.hostname, connect_port, scheme="https")
+        except (TypeError, ValueError, UnicodeError):
+            scope._record_scope_block("origin_mismatch", authority_text)
             self._deny(403, "Target is outside the selected scan scope")
             return
 
-        target_url = f"{scope.scheme}://{scope.hostname}:{scope.port}/"
         self.close_connection = True
         upstream = None
         upstream_tracked = False
@@ -400,12 +428,12 @@ class _ScopeProxyHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
             client_hello = self._read_tls_client_hello()
             if client_hello is None:
-                with scope._lock:
-                    scope._stats["out_of_scope_attempts_blocked"] += 1
+                scope._record_scope_block("invalid_tls_client_hello_or_sni", authority_text)
                 return
             # Do not consume the tunnel allowance for clients that fail the SNI
             # check. CONNECT has already been acknowledged, so a limit denial
             # closes the tunnel and is reflected in the proxy statistics.
+            target_url = f"https://{scope.hostname}:{connect_port}/"
             if not scope.authorize(target_url, kind="connect"):
                 return
             upstream = socket.create_connection((scope.pinned_ip, scope.port), timeout=scope.timeout)
@@ -415,7 +443,9 @@ class _ScopeProxyHandler(BaseHTTPRequestHandler):
                 return
             self.connection.settimeout(None)
             upstream.sendall(client_hello)
-        except (OSError, ValueError, TimeoutError):
+        except (OSError, ValueError, TimeoutError) as exc:
+            if isinstance(exc, ValueError):
+                scope._record_scope_block("invalid_tls_client_hello_or_sni", authority_text)
             if upstream is not None:
                 upstream.close()
             return
@@ -464,8 +494,10 @@ class _ScopeProxyHandler(BaseHTTPRequestHandler):
             scope._reserve_method_block()
             self._deny(405, "HTTP method is not enabled for scanning")
             return
+        authority_sample = None
         try:
             parts = urlsplit(self.path)
+            authority_sample = parts.netloc or None
             if self.scope.scheme != "http" or parts.scheme.lower() != "http" or not parts.netloc:
                 raise ValueError("HTTPS targets must use a CONNECT tunnel")
             scope._validate_url(self.path)
@@ -484,8 +516,7 @@ class _ScopeProxyHandler(BaseHTTPRequestHandler):
             if body_length < 0 or body_length > _MAX_REQUEST_BODY_BYTES:
                 raise ValueError("Request body exceeds the scope proxy limit")
         except (TypeError, ValueError, UnicodeError):
-            with scope._lock:
-                scope._stats["out_of_scope_attempts_blocked"] += 1
+            scope._record_scope_block("out_of_scope_http_request", authority_sample)
             self._deny(403, "Target is outside the selected scan scope")
             return
 
@@ -658,6 +689,24 @@ def _host_header(hostname: str, port: int, scheme: str) -> str:
     host = f"[{hostname}]" if ":" in hostname else hostname
     default = 443 if scheme == "https" else 80
     return host if port == default else f"{host}:{port}"
+
+
+def _safe_authority(value: str | None) -> str | None:
+    """Normalize a blocked origin without retaining its path, query or credentials."""
+    if not isinstance(value, str) or not value or len(value) > 4096:
+        return None
+    try:
+        parts = urlsplit(value if "://" in value else f"//{value}")
+        if not parts.hostname:
+            return None
+        host = _normalize_host(parts.hostname)
+        port = parts.port
+    except (ValueError, UnicodeError):
+        return None
+    display_host = f"[{host}]" if ":" in host else host
+    authority = f"{display_host}:{port}" if port is not None else display_host
+    scheme = parts.scheme.lower() if parts.scheme.lower() in {"http", "https"} else ""
+    return f"{scheme}://{authority}" if scheme else authority
 
 
 def _read_socket_exact(connection: socket.socket, size: int) -> bytes:

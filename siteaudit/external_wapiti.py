@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -19,7 +20,10 @@ from .external_support import (
 )
 
 
-_SAFE_MODULES = ("cookieflags", "csp", "http_header", "http_headers", "nikto", "sql", "crlf")
+# Wapiti's Nikto module fetches its database from raw.githubusercontent.com
+# when its local cache is absent. Keep the upstream scanner inside the selected
+# target scope; SiteAudit has a separate, scoped Nikto adapter for that coverage.
+_SAFE_MODULES = ("cookieflags", "csp", "http_header", "http_headers", "sql", "crlf")
 _WAPITI_LEVELS = {"0": "info", "1": "low", "2": "medium", "3": "high"}
 
 
@@ -177,6 +181,7 @@ def _import_report(ctx: Any, report: dict[str, Any]) -> int:
 
 def run(ctx: Any) -> dict[str, Any]:
     """Run Wapiti with its bounded, same-folder, non-OAST module selection."""
+    started_at = time.monotonic()
     executable = find_executable("wapiti", "wapiti3")
     options = getattr(ctx, "options", {}) or {}
     engine_timeout = min(max(float(options.get("external_engine_timeout", 300)), 15.0), 1800.0)
@@ -236,10 +241,17 @@ def run(ctx: Any) -> dict[str, Any]:
         "version": version,
         "exit_code": result.returncode,
         "duration_seconds": result.duration_seconds,
+        "engine_elapsed_seconds": round(time.monotonic() - started_at, 3),
         "requests_sent": None,
         "findings_imported": imported,
         "modules": modules,
         "scope": f"folder (rooted at {scan_url})",
+        "max_depth": max_depth,
+        "max_links_per_page": link_limit,
+        "max_files_per_directory": file_limit,
+        "max_parameters_per_request": 8,
+        "max_total_pages_enforced": False,
+        "runtime_limit_seconds": engine_timeout,
         "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP; HTTPS Host headers inside TLS are not inspected.",
         "rate_control": "one task with polite scan force; Wapiti has no global requests-per-second flag",
         "max_pages_enforced": False,
