@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -200,6 +201,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", action="append", choices=("all", "nuclei", "nikto", "wapiti", "zap", "w3af"), default=[], help="Also run an installed upstream scanner; repeat or use 'all'")
     parser.add_argument("--engine-timeout", type=int, default=300, help="Scan budget per upstream engine in seconds (30-1800; ZAP baseline/active need 120/180+, default: 300)")
     parser.add_argument("--nuclei-templates", help="Use and filter local Nuclei templates (default: managed engine pack, then ~/nuclei-templates)")
+    parser.add_argument("--nuclei-tags", help="Run only Nuclei templates with these comma-separated tags (for example: misconfig,exposure)")
     parser.add_argument("--nuclei-auto-scan", action="store_true", help="Let Nuclei select a narrower template set from detected web technologies")
     parser.add_argument("--zap-active", action="store_true", help="Use ZAP full active scan instead of passive baseline; may change target behavior")
     parser.add_argument("--allow-private", action="store_true", help="Allow private/loopback IP targets (use only on your own lab network)")
@@ -232,6 +234,15 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--nuclei-templates requires --engine nuclei")
     if args.nuclei_auto_scan and "nuclei" not in args.engine and "all" not in args.engine:
         parser.error("--nuclei-auto-scan requires --engine nuclei")
+    if args.nuclei_tags is not None:
+        if "nuclei" not in args.engine and "all" not in args.engine:
+            parser.error("--nuclei-tags requires --engine nuclei")
+        if args.nuclei_auto_scan:
+            parser.error("--nuclei-tags cannot be combined with --nuclei-auto-scan")
+        tags = [item.strip().lower() for item in args.nuclei_tags.split(",")]
+        if not 1 <= len(tags) <= 50 or any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", item) for item in tags):
+            parser.error("--nuclei-tags must be a comma-separated list of 1-50 simple tag names")
+        args.nuclei_tags = ",".join(dict.fromkeys(tags))
     if args.nuclei_templates:
         nuclei_templates = Path(args.nuclei_templates).expanduser()
         if not nuclei_templates.exists() or not (nuclei_templates.is_file() or nuclei_templates.is_dir()):
@@ -265,6 +276,7 @@ def run_scan(args: argparse.Namespace, progress: ProgressReporter | None = None)
         "external_engines": args.engine,
         "external_engine_timeout": args.engine_timeout,
         "nuclei_templates": args.nuclei_templates,
+        "nuclei_tags": args.nuclei_tags,
         "nuclei_auto_scan": args.nuclei_auto_scan,
         "zap_active": args.zap_active,
         "external_only": args.external_only,

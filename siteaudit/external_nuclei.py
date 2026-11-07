@@ -22,6 +22,8 @@ _TEMPLATE_EXTENSIONS = {".yaml", ".yml", ".json"}
 _MAX_TEMPLATE_FILES = 20_000
 _MAX_TEMPLATE_BYTES = 512_000_000
 _MAX_SINGLE_TEMPLATE_BYTES = 16_000_000
+_MAX_TAG_COUNT = 50
+_TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 
 def _template_source(configured: Any) -> tuple[Path, str]:
@@ -118,6 +120,10 @@ def run(ctx: Any) -> dict[str, Any]:
     timeout = float((ctx.options or {}).get("external_engine_timeout", 300))
     started_at = time.monotonic()
     version = _version(executable, timeout=min(timeout, 15))
+    tags = _validated_tags((ctx.options or {}).get("nuclei_tags"))
+    auto_scan = bool((ctx.options or {}).get("nuclei_auto_scan"))
+    if tags and auto_scan:
+        raise EngineRunError("Nuclei tag filtering cannot be combined with automatic technology scanning")
     request_timeout = max(1, int((ctx.options or {}).get("timeout", 10)))
     delay = max(0.1, float((ctx.options or {}).get("delay", 0.5)))
     # Nuclei accepts an integer per-second rate. Floor to avoid exceeding the
@@ -155,7 +161,8 @@ def run(ctx: Any) -> dict[str, Any]:
             "-proxy-internal",
             "-t", str(safe_templates),
         ]
-        auto_scan = bool((ctx.options or {}).get("nuclei_auto_scan"))
+        if tags:
+            command.extend(["-tags", tags])
         if auto_scan:
             command.append("-as")
         # Route even internal references through the scope proxy. Nuclei's
@@ -164,6 +171,10 @@ def run(ctx: Any) -> dict[str, Any]:
         remaining_timeout = timeout - (time.monotonic() - started_at)
         if remaining_timeout <= 0:
             raise EngineRunError("Nuclei template preparation exceeded the engine time limit")
+        # Let Nuclei stop on its own shortly before the process watchdog. This
+        # preserves JSONL findings and avoids killing Go midway through output.
+        scan_max_time_seconds = max(1, int(remaining_timeout - 3))
+        command.extend(["-max-time", f"{scan_max_time_seconds}s"])
         scan_error = None
         try:
             process = run_command(command, timeout=remaining_timeout)
@@ -221,13 +232,17 @@ def run(ctx: Any) -> dict[str, Any]:
         ):
             findings_added += 1
 
-    status = "completed" if process.returncode == 0 and not scan_error else ("partial" if findings_added else "error")
+    max_time_reached = _max_time_reached(process.duration_seconds, scan_max_time_seconds)
+    status = _scan_status(process.returncode, scan_error=bool(scan_error), max_time_reached=max_time_reached)
+    templates_loaded = _parse_loaded_templates(process.stdout + "\n" + process.stderr)
     result: dict[str, Any] = {
         "status": status,
         "version": version,
         "duration_seconds": process.duration_seconds,
         "engine_elapsed_seconds": round(time.monotonic() - started_at, 3),
         "engine_timeout_seconds": timeout,
+        "scanner_max_time_seconds": scan_max_time_seconds,
+        "scanner_max_time_reached": max_time_reached,
         "template_preparation_seconds": round(preparation_seconds, 3),
         "template_scan_seconds": round(process.duration_seconds, 3),
         "findings_added": findings_added,
@@ -236,21 +251,55 @@ def run(ctx: Any) -> dict[str, Any]:
         "malformed_output_lines": malformed_lines,
         "rate_limit_per_second": rate_limit,
         "concurrency": 1,
-        "scan_mode": "technology-aware" if auto_scan else "all-selected-http-templates",
+        "scan_mode": "technology-aware" if auto_scan else ("tag-filtered-http-templates" if tags else "all-selected-http-templates"),
+        "template_tags_filter": tags.split(",") if tags else None,
         "input_targets": 1,
         "total_page_cap_enforced": False,
         "template_source": template_source,
         "templates_used": templates_used,
+        "templates_copied_to_safe_directory": templates_used,
+        "templates_loaded_by_scanner": templates_loaded,
         "templates_blocked_network_dsl": templates_blocked,
         "scope_note": "The scope proxy restricts HTTP requests and HTTPS tunnels to the selected host and port and pins the IP. HTTPS Host headers inside TLS are not inspected. Templates using resolve(), public_ip(), or jarm() are excluded because Nuclei v3.11.1 can make those calls outside the proxy.",
     }
     if delay > 1:
         result["rate_limit_note"] = "Nuclei integer rate limit cannot enforce delays slower than one request per second."
-    if process.returncode != 0 and process.stderr.strip():
-        result["error"] = " ".join(process.stderr.split())[:1000]
-    if scan_error:
+    if max_time_reached:
+        result["partial_reason"] = "nuclei_scanner_max_time_reached"
+        result["error"] = "Nuclei reached its scanner-side time budget; template coverage is incomplete."
+    elif scan_error:
+        result["partial_reason"] = "external_process_time_limit"
         result["error"] = scan_error[:1000]
+    elif process.returncode != 0 and process.stderr.strip():
+        result["error"] = " ".join(process.stderr.split())[:1000]
     return result
+
+
+def _validated_tags(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise EngineRunError("Nuclei tags must be a comma-separated string")
+    tags = [item.strip().lower() for item in value.split(",")]
+    if not 1 <= len(tags) <= _MAX_TAG_COUNT or any(not _TAG_PATTERN.fullmatch(item) for item in tags):
+        raise EngineRunError(f"Nuclei tags must contain 1-{_MAX_TAG_COUNT} simple tag names")
+    return ",".join(dict.fromkeys(tags))
+
+
+def _max_time_reached(duration_seconds: float, max_time_seconds: int) -> bool:
+    tolerance = max(0.1, min(3.0, max_time_seconds * 0.05))
+    return duration_seconds >= max_time_seconds - tolerance
+
+
+def _scan_status(return_code: int, *, scan_error: bool, max_time_reached: bool) -> str:
+    if scan_error or max_time_reached:
+        return "partial"
+    return "completed" if return_code == 0 else "error"
+
+
+def _parse_loaded_templates(output: str) -> int | None:
+    match = re.search(r"(?i)templates loaded for current scan:\s*([0-9][0-9,]*)", output)
+    return int(match.group(1).replace(",", "")) if match else None
 
 
 def _in_scope(ctx: Any, url: str) -> bool:

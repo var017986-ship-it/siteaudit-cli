@@ -41,18 +41,20 @@ echo   2. Standard scan          ^(built-in checks, 50 pages^)
 echo   3. Deep SiteAudit scan    ^(up to 200 built-in pages, SQLi/GraphQL^)
 echo   4. Full combined scan    ^(SiteAudit + active ZAP, if installed^)
 echo   5. Upstream engines only ^(ZAP active, if installed^)
-echo   6. Check engine readiness
-echo   7. Exit
+echo   6. Focused Nuclei scan    ^(misconfig/exposure, up to 15 min^)
+echo   7. Check engine readiness
+echo   8. Exit
 echo.
-choice /C 1234567 /N /M "Choose a mode: "
-if errorlevel 7 goto end
-if errorlevel 6 (
+choice /C 12345678 /N /M "Choose a mode: "
+if errorlevel 8 goto end
+if errorlevel 7 (
     ".venv\Scripts\python.exe" -m siteaudit --doctor
     echo.
     pause
     goto menu
 )
-if errorlevel 5 (
+if errorlevel 6 if not errorlevel 7 set "SCAN_ARGS=--external-only --max-pages 50 --max-depth 2 --delay 1 --engine nuclei --nuclei-tags misconfig,exposure --engine-timeout 900"
+if errorlevel 5 if not errorlevel 6 (
     set "SCAN_ARGS=--external-only --max-pages 100 --max-depth 3 --delay 1 --engine all --engine-timeout 300 --zap-active"
     set "RUN_ENGINE_DOCTOR=1"
 )

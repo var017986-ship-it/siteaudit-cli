@@ -4,7 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from siteaudit.cli import run_scan
+from siteaudit.cli import _parser, _validate_args, run_scan
+from siteaudit.external_nuclei import EngineRunError, _max_time_reached, _parse_loaded_templates, _scan_status, _validated_tags
 
 
 def _args(*, external_only: bool = False) -> SimpleNamespace:
@@ -23,6 +24,7 @@ def _args(*, external_only: bool = False) -> SimpleNamespace:
         engine=["nuclei"] if external_only else [],
         engine_timeout=60,
         nuclei_templates=None,
+        nuclei_tags=None,
         nuclei_auto_scan=False,
         zap_active=False,
         external_only=external_only,
@@ -43,6 +45,34 @@ def _context(*, request_limit_reached: bool = False) -> SimpleNamespace:
 
 
 class ScanStatusTests(unittest.TestCase):
+    def test_nuclei_tags_are_normalized_and_deduplicated(self) -> None:
+        self.assertEqual(_validated_tags(" misconfig,exposure,misconfig "), "misconfig,exposure")
+
+    def test_nuclei_tags_reject_path_like_values(self) -> None:
+        with self.assertRaisesRegex(EngineRunError, "simple tag names"):
+            _validated_tags("misconfig,../other")
+
+    def test_nuclei_loaded_template_count_is_reported(self) -> None:
+        self.assertEqual(
+            _parse_loaded_templates("[INF] Templates loaded for current scan: 5,680"),
+            5680,
+        )
+
+    def test_nuclei_deadline_does_not_report_zero_findings_as_complete(self) -> None:
+        self.assertTrue(_max_time_reached(29.2, 30))
+        self.assertFalse(_max_time_reached(0.1, 1))
+        self.assertEqual(_scan_status(0, scan_error=False, max_time_reached=True), "partial")
+        self.assertEqual(_scan_status(0, scan_error=False, max_time_reached=False), "completed")
+
+    def test_cli_rejects_ambiguous_nuclei_selection(self) -> None:
+        parser = _parser()
+        args = parser.parse_args([
+            "https://example.com", "--engine", "nuclei", "--nuclei-tags", "misconfig",
+            "--nuclei-auto-scan",
+        ])
+        with self.assertRaises(SystemExit):
+            _validate_args(parser, args)
+
     def test_builtin_request_limit_marks_report_partial(self) -> None:
         ctx = _context(request_limit_reached=True)
         with patch("siteaudit.cli.ScanContext", return_value=ctx), patch("siteaudit.template_engine.prepare"), patch(
